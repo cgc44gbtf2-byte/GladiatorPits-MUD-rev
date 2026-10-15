@@ -16,16 +16,27 @@
  Required library files.
  ******************************************************************************/
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <strings.h>
+#include <stdint.h>
+#include <time.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 
 /******************************************************************************
  Required literals.
@@ -33,7 +44,9 @@
 
 #define MAX_BUF   4096 /* Storage size used for many char arrays */
 #define MAX_TRAIN   30 /* Max number of trains allowed */
+#ifndef PORT
 #define PORT      3000 /* The port number of the mud */
+#endif
 #define STR          0 /* Strength */
 #define DEX          1 /* Dexterity */
 #define STA          2 /* Stamina */
@@ -46,8 +59,8 @@
 
 #define CMD(f)      void Cmd##f (conn_t*pstConn,char*szTxt)
 #define NO_INPUT(t) if(!szTxt[0]) {PutOutput(pstConn,TO_USER,t);return;}
-#define NEED_BODY   if(!pstConn->pstBody) {Log("BUG[%s]: No body!\n",__FUNCTION__);return;}
-#define IP(n)      (pstConn->iIp>>(8*n))&255
+#define NEED_BODY   if(!pstConn->pstBody) {Log("BUG[%s]: No body!\n",__func__);return;}
+#define IP(n)      (int)((pstConn->iIp>>(8*(n)))&255U)
 #define HEALTH(p)  (p->iStats[STR]+(p->iStats[STA]*7)+(p->iStats[SIZ]*3))
 #define ATTACK(p)  ((p->iStats[DEX]*2)+p->iStats[SIZ])
 #define DEFENCE(p) ((p->iStats[WIT]*2)+p->iStats[DEX])
@@ -75,7 +88,7 @@ typedef struct body body_t;
 typedef struct
 {
    char       *szCommand;
-   void      (*pfFunction)();
+   void      (*pfFunction)(conn_t*,char*);
    status_t eType;
 } cmd_table_t;
 
@@ -110,13 +123,9 @@ void    TrainStat       (conn_t*pstConn,char*szTxt,int iStat);
 char   *StatusName      (body_t*pstBody);
 conn_t *FindPerson      (char*szTxt);
 void    Save            (body_t*pstBody);
-
-/* Utility functions */
-time_t  time            (time_t *t);
-int     strcasecmp      (const char *s1, const char *s2);
-int     getdtablesize   (void);
-void    bcopy           (const void *s1, void *s2, size_t n);
-char    *ctime          (const time_t *timer);
+void    ClearChallenge  (conn_t*pstConn);
+bool    ValidPlayerName (const char*szName);
+bool    ValidPlayer     (const body_t*pstBody,const char*szName);
 
 /******************************************************************************
  Required global variables.
@@ -135,14 +144,15 @@ static struct connection
    body_t  *pstBody;
    status_t eStatus;
    char     a_chInBuf[MAX_BUF],a_chOutBuf[MAX_BUF];
-   int      iSocket,iInLen,iOutLen,iIp;
+   int      iSocket,iInLen,iOutLen;
+   uint32_t iIp;
+   bool     bWriteFailed,bClosing,bInputTooLong;
    conn_t  *pstPrev,*pstNext;
 } stConnEmpty;
 
 conn_t     *pstFirstConn=NULL; /* Connection list */
 fd_set      a_sFd;             /* Array of socket flags */
 bool        bShutdown=FALSE;   /* When TRUE, shut mud down */
-FILE       *pFile;             /* File pointer */
 
 extern const cmd_table_t kstCmdTable[];
 
@@ -159,12 +169,12 @@ const cmd_table_t kstCmdTable[] =
    {"quit",      CmdQuit,      ALL},
    {"who",       CmdWho,       ALL},
    {"commands",  CmdCommands,  ALL},
-   {"shutdown",  CmdShutdown,  ~CROWD},
+   {"shutdown",  CmdShutdown,  ALL&~CROWD},
    {"say",       CmdSay,       ALL},
-   {"chat",      CmdChat,      ~CROWD},
+   {"chat",      CmdChat,      ALL&~CROWD},
    {"emote",     CmdEmote,     ALL},
    {"create",    CmdCreate,    CROWD},
-   {"score",     CmdScore,     ~CROWD},
+   {"score",     CmdScore,     ALL&~CROWD},
    {"train",     CmdTrain,     CITIZEN},
    {"str",       CmdStr,       TRAINING},
    {"dex",       CmdDex,       TRAINING},
@@ -174,7 +184,7 @@ const cmd_table_t kstCmdTable[] =
    {"leave",     CmdLeave,     TRAINING},
    {"challenge", CmdChallenge, GLADIATOR|CHALLENGER},
    {"accept",    CmdAccept,    GLADIATOR},
-   {NULL}
+   {NULL,NULL,0}
 };
 
 /******************************************************************************
@@ -193,18 +203,26 @@ const cmd_table_t kstCmdTable[] =
  *
  * This function has to return an int, which is 0 (unless the mud crashes).
  */
-int main()
+int main(void)
 {
    int iControl; /* Contains the control socket descriptor */
+   struct sockaddr_in stAddress;
+   socklen_t iAddressSize=sizeof(stAddress);
+
+   /* A disconnected client must not terminate the whole server on write. */
+   signal(SIGPIPE,SIG_IGN);
 
    /* Seed the dice */
-   srand(time(0));
-
-   /* Startup message */
-   Log("Mud started on port %d.\n",PORT);
+   srand((unsigned int)time(0));
 
    /* Initialise the control socket */
    iControl=InitSocket();
+   if(iControl<0)
+      return EXIT_FAILURE;
+
+   /* Only report startup after the listener has been created. */
+   if(getsockname(iControl,(struct sockaddr*)&stAddress,&iAddressSize)==0)
+      Log("Mud started on port %d.\n",(int)ntohs(stAddress.sin_port));
 
    /* Call the main loop */
    GameLoop(iControl);
@@ -226,7 +244,7 @@ int main()
  *
  * This function returns an int: The descriptor of the socket created.
  */
-int InitSocket()
+int InitSocket(void)
 {
    static struct sockaddr_in s_stSaEmpty; /* Empty structure */
    struct sockaddr_in   stSa=s_stSaEmpty; /* Clear stSa */
@@ -241,16 +259,36 @@ int InitSocket()
 
    /* Create the control socket and stores it's descriptor in iFd */
    iFd=socket(AF_INET,SOCK_STREAM,0);
+   if(iFd<0)
+   {
+      Log("Cannot create listening socket: %s\n",strerror(errno));
+      return -1;
+   }
+   if(iFd>=FD_SETSIZE)
+   {
+      Log("Listening socket exceeds select descriptor limit.\n");
+      close(iFd);
+      return -1;
+   }
 
    /* Set the socket options */
-   setsockopt(iFd,SOL_SOCKET,SO_REUSEADDR,(char*)&iOpt,sizeof(iOpt));
-   setsockopt(iFd,SOL_SOCKET,SO_LINGER,&stLd,sizeof(stLd));
+   if(setsockopt(iFd,SOL_SOCKET,SO_REUSEADDR,&iOpt,sizeof(iOpt))<0||
+      setsockopt(iFd,SOL_SOCKET,SO_LINGER,&stLd,sizeof(stLd))<0||
+      fcntl(iFd,F_SETFL,O_NONBLOCK)<0)
+   {
+      Log("Cannot configure listening socket: %s\n",strerror(errno));
+      close(iFd);
+      return -1;
+   }
 
    /* Assign the name (stSa) to the control socket (iFd) */
-   bind(iFd,(struct sockaddr*)&stSa,sizeof(stSa));
-
-   /* Allow iFd to accept incoming connections, with up to 3 pending */
-   listen(iFd,3); /* Backlog 3, max is 5 in BSD, SOMAXCONN in Linux */
+   if(bind(iFd,(struct sockaddr*)&stSa,sizeof(stSa))<0||
+      listen(iFd,SOMAXCONN)<0)
+   {
+      Log("Cannot bind/listen on port %d: %s\n",PORT,strerror(errno));
+      close(iFd);
+      return -1;
+   }
 
    /* Return the description of the control socket */
    return iFd;
@@ -269,11 +307,14 @@ int InitSocket()
  */
 void CloseSocket(int iSocket)
 {
+   if(iSocket<0)
+      return;
    /* Close the iSocket descriptor */
    close(iSocket);
 
    /* Remove iSocket from the descriptor set */
-   FD_CLR(iSocket,&a_sFd);
+   if(iSocket<FD_SETSIZE)
+      FD_CLR(iSocket,&a_sFd);
 }
 
 
@@ -291,39 +332,38 @@ void CloseSocket(int iSocket)
  */
 bool GetInput(conn_t*pstConn)
 {
-   char a_chBuf[MAX_BUF]={'\0'}; /* Text storage buffer */
-   int  iInput,i;
-   bool bReadLine=FALSE;
+   char a_chBuf[MAX_BUF]; /* Text storage buffer */
+   ssize_t iInput;
+   int i;
 
    /* Read the input from the socket */
    if((iInput=read(pstConn->iSocket,a_chBuf,MAX_BUF))<=0)
-      return FALSE; /* Connection was lost while reading */
+      return iInput<0&&(errno==EINTR||errno==EAGAIN||errno==EWOULDBLOCK);
 
-   /* Store the usable (printing) characters in the connection's input buffer */
-   for(i=0; i<iInput && pstConn->iInLen<MAX_BUF-1 && !bReadLine; i++)
+   /* Process every complete line; TCP may deliver several in one read. */
+   for(i=0;i<(int)iInput;i++)
    {
-      /* Only store the printing characters */
-      if(isprint(a_chBuf[i]))
-         pstConn->a_chInBuf[pstConn->iInLen++]=a_chBuf[i];
-      else if(a_chBuf[i]=='\n')
-         bReadLine=TRUE; /* A full input line has been read */
-   }
-
-   /* Terminate the connection's input buffer */
-   pstConn->a_chInBuf[pstConn->iInLen]='\0';
-
-   /* If a full line has been read in */
-   if(bReadLine)
-   {
-      /* Parse the line of input */
-      ParseInput(pstConn);
-
-      /* Display the prompt (unless there was no input) */
-      if(pstConn->iInLen)
-         PutPrompt(pstConn);
-
-      /* Reset the input buffer */
-      pstConn->iInLen=0;
+      if(a_chBuf[i]=='\n')
+      {
+         pstConn->a_chInBuf[pstConn->iInLen]='\0';
+         if(pstConn->bInputTooLong)
+            PutOutput(pstConn,TO_USER,"Input line too long.\n\r");
+         else
+            ParseInput(pstConn);
+         if(pstConn->bClosing)
+            return FALSE;
+         if(pstConn->iInLen)
+            PutPrompt(pstConn);
+         pstConn->iInLen=0;
+         pstConn->bInputTooLong=FALSE;
+      }
+      else if(isprint((unsigned char)a_chBuf[i]))
+      {
+         if(pstConn->iInLen<MAX_BUF-1)
+            pstConn->a_chInBuf[pstConn->iInLen++]=a_chBuf[i];
+         else
+            pstConn->bInputTooLong=TRUE;
+      }
    }
 
    /* Input was successfully read from the connection */
@@ -397,16 +437,21 @@ void ParseInput(conn_t*pstConn)
 void PutOutput(conn_t*pstConn,out_t peOut,char*szTxt,...)
 {
    va_list pArg;             /* Pointer to the next argument */
-   bool    bRePrompt=FALSE;
+   bool    bRePrompt;
    conn_t *pstUser;
    char    a_chBuf[MAX_BUF];
-   int     flush;
+   int     iLen,i;
 
    /* Variable arguments lists "start" macro */
    va_start(pArg,szTxt);
 
-   /* Store szTxt in a_chBuf as per sprintf, using pArg for arguments */
-   vsprintf(a_chBuf,szTxt,pArg);
+   /* Network input must never expand past the formatting buffer. */
+   iLen=vsnprintf(a_chBuf,sizeof(a_chBuf),szTxt,pArg);
+   va_end(pArg);
+   if(iLen<0)
+      return;
+   if(iLen>=MAX_BUF)
+      iLen=MAX_BUF-1;
 
    /* Loop through all connections */
    for(pstUser=pstFirstConn;pstUser;pstUser=pstUser->pstNext)
@@ -415,13 +460,24 @@ void PutOutput(conn_t*pstConn,out_t peOut,char*szTxt,...)
       switch(peOut)
       {
          case TO_USER:/* Text goes to just the user */
-            if(pstUser==pstConn)break;continue;
+            if(pstUser!=pstConn)
+               continue;
+            break;
          case TO_ROOM:/* Text goes to all in users room - except user */
-            if(pstUser!=pstConn&&ROOM(pstConn)==ROOM(pstUser))break;continue;
+            if(pstUser==pstConn||ROOM(pstConn)!=ROOM(pstUser))
+               continue;
+            break;
          case TO_WORLD:/* Text goes to all in world - except user */
-            if(pstUser!=pstConn)break;continue;
-         case TO_ALL:;/* Text goes to all in world - including user */
+            if(pstUser==pstConn)
+               continue;
+            break;
+         case TO_ALL:/* Text goes to all in world - including user */
+            break;
       }
+
+      if(pstUser->bWriteFailed)
+         continue;
+      bRePrompt=FALSE;
 
       /* Determine if their prompt needs to be redrawn first */
       if(!pstUser->iOutLen&&!pstUser->iInLen)
@@ -432,27 +488,24 @@ void PutOutput(conn_t*pstConn,out_t peOut,char*szTxt,...)
          bRePrompt=TRUE;
       }
 
-      /* Set szTxt to points to the start of the reformated text */
-      szTxt=a_chBuf;
-
       /* Display the text to the current connection */
-      while(*szTxt)
+      for(i=0;i<iLen;i++)
       {
-         pstUser->a_chOutBuf[pstUser->iOutLen++]=*szTxt++;
          if(pstUser->iOutLen>=MAX_BUF-1)
-            flush = 1;
-            while (flush != 0) {
-               flush = FlushOutput(pstUser);
+         {
+            if(FlushOutput(pstUser)!=0)
+            {
+               pstUser->bWriteFailed=TRUE;
+               break;
             }
+         }
+         pstUser->a_chOutBuf[pstUser->iOutLen++]=a_chBuf[i];
       }
 
       /* Redraw the prompt if required */
-      if(bRePrompt)
+      if(bRePrompt&&!pstUser->bWriteFailed)
          PutPrompt(pstUser);
    }
-
-   /* Variable arguments lists "end" macro */
-   va_end(pArg);
 }
 
 
@@ -464,24 +517,30 @@ void PutOutput(conn_t*pstConn,out_t peOut,char*szTxt,...)
  *
  * pstConn: The connection to be flushed.
  *
- * This function returns the length of what remains to be flushed.
+ * Returns zero when empty, remaining bytes on backpressure, or -1 on failure.
  */
 int FlushOutput(conn_t*pstConn)
 {
-   /* Check that the connection's output buffer isn't empty */
-   if(pstConn->iOutLen>0)
+   /* Retry partial/interrupted writes, but never spin on a failed socket. */
+   while(pstConn->iOutLen>0)
    {
-      /* Write the content of the output buffer to the socket descriptor */
-      ssize_t ret=write(pstConn->iSocket,pstConn->a_chOutBuf,pstConn->iOutLen);
+      ssize_t ret=write(pstConn->iSocket,pstConn->a_chOutBuf,
+         (size_t)pstConn->iOutLen);
 
-      if (ret >= pstConn->iOutLen) {
-         /* Indicate that the output buffer is now empty */
-         pstConn->iOutLen=0;
-      } else if (ret > 0) {
-         pstConn->iOutLen = pstConn->iOutLen - ret;
+      if(ret>0)
+      {
+         pstConn->iOutLen-=(int)ret;
+         memmove(pstConn->a_chOutBuf,pstConn->a_chOutBuf+ret,
+            (size_t)pstConn->iOutLen);
       }
+      else if(ret<0&&errno==EINTR)
+         continue;
+      else if(ret<0&&(errno==EAGAIN||errno==EWOULDBLOCK))
+         return pstConn->iOutLen;
+      else
+         return -1;
    }
-   return pstConn->iOutLen;
+   return 0;
 }
 
 
@@ -516,8 +575,27 @@ void PutPrompt(conn_t*pstConn)
 bool NewConnection(int iSocket)
 {
    struct sockaddr_in stSa;
-   int    iSaSize;
+   socklen_t iSaSize=sizeof(stSa);
    conn_t*pstConn;
+
+   if(iSocket<0||iSocket>=FD_SETSIZE)
+   {
+      CloseSocket(iSocket);
+      Log("Rejected socket outside select descriptor limit.\n");
+      return FALSE;
+   }
+   if(getpeername(iSocket,(struct sockaddr*)&stSa,&iSaSize)<0)
+   {
+      CloseSocket(iSocket);
+      Log("Cannot identify new connection: %s\n",strerror(errno));
+      return FALSE;
+   }
+   if(fcntl(iSocket,F_SETFL,O_NONBLOCK)<0)
+   {
+      CloseSocket(iSocket);
+      Log("Cannot make new connection nonblocking: %s\n",strerror(errno));
+      return FALSE;
+   }
 
    /* Attempt to allocate space for a new connection */
    if(!(pstConn=(conn_t*)malloc(sizeof(conn_t))))
@@ -551,8 +629,6 @@ bool NewConnection(int iSocket)
    pstConn->iSocket=iSocket;
 
    /* Calculate and store the ip address of the new connection */
-   iSaSize=sizeof(stSa);
-   getpeername(iSocket,(struct sockaddr*)&stSa,&iSaSize);
    pstConn->iIp=ntohl(stSa.sin_addr.s_addr);
 
    /* Log the connection */
@@ -578,11 +654,12 @@ bool NewConnection(int iSocket)
  */
 void CloseConnection(conn_t*pstConn)
 {
-   int flush = 1;
-
    /* Must free their body, if they've created one */
    if(pstConn->pstBody)
    {
+      if(pstConn->eStatus!=FIGHTING)
+         ClearChallenge(pstConn);
+
       /* If they are fighting someone, that person has to stop */
       if(pstConn->pstBody->pstOpponent)
       {
@@ -615,9 +692,7 @@ void CloseConnection(conn_t*pstConn)
    }
 
    /* Have a quick flush in case there is any pending output */
-   while (flush != 0) {
-      flush = FlushOutput(pstConn);
-   }
+   FlushOutput(pstConn);
 
    /* If the connection was first in the list, reset the start of list */
    if(pstFirstConn==pstConn)
@@ -651,13 +726,10 @@ void GameLoop(int iControl)
 {
    struct  timeval stTv;
    fd_set  sFd;
+   fd_set  sWriteFd;
    int     iFdMax;
    time_t  tTime=0;
    conn_t *pstConn,*pstConnNext;
-   int     flush;
-
-   /* Work out how many descriptors can be open at once */
-   iFdMax=getdtablesize(); /* May want to error trap for -1 */
 
    /* Clear the descriptor set */
    FD_ZERO(&a_sFd);
@@ -668,14 +740,23 @@ void GameLoop(int iControl)
    do /* until a shutdown occurs */
    {
       /* Clear the socket flags */
-      bcopy((char*)&a_sFd,(char*)&sFd,sizeof(sFd));
+      memcpy(&sFd,&a_sFd,sizeof(sFd));
+      FD_ZERO(&sWriteFd);
+      iFdMax=iControl+1;
+      for(pstConn=pstFirstConn;pstConn;pstConn=pstConn->pstNext)
+      {
+         if(pstConn->iSocket>=iFdMax)
+            iFdMax=pstConn->iSocket+1;
+         if(pstConn->iOutLen>0)
+            FD_SET(pstConn->iSocket,&sWriteFd);
+      }
 
       /* Set to 1 second */
       stTv.tv_sec=1;
       stTv.tv_usec=0;
 
       /* Sleep until a descriptor tries to do something */
-      if(select(iFdMax,&sFd,(fd_set*)0,(fd_set*)0,&stTv)<0)
+      if(select(iFdMax,&sFd,&sWriteFd,(fd_set*)0,&stTv)<0)
          continue; /* Try again if it raised an exception */
 
       /* Update pulse called every second */
@@ -689,7 +770,8 @@ void GameLoop(int iControl)
       if(FD_ISSET(iControl,&sFd))
       {
          struct sockaddr_in stSa;
-         int iNewConnection,iSaSize=sizeof(stSa);
+         int iNewConnection;
+         socklen_t iSaSize=sizeof(stSa);
          /* Looking for pending connections on the control socket */
          if((iNewConnection=accept(iControl,(struct sockaddr*)&stSa,&iSaSize))>=0)
             NewConnection(iNewConnection); /* Create a new connection */
@@ -701,14 +783,11 @@ void GameLoop(int iControl)
          pstConnNext=pstConn->pstNext;
 
          /* Activity on the socket but no input means dropped connection */
-         if (FD_ISSET(pstConn->iSocket,&sFd)&&!GetInput(pstConn))
+         if (pstConn->bClosing||pstConn->bWriteFailed||
+             (FD_ISSET(pstConn->iSocket,&sFd)&&!GetInput(pstConn)))
             CloseConnection(pstConn);
-         else { /* Otherwise flush the output buffer */
-            flush = 1;
-            while (flush != 0) {
-               flush = FlushOutput(pstConn);
-            }
-         }
+         else if(FlushOutput(pstConn)<0)
+            CloseConnection(pstConn);
       }
    }
    while (!bShutdown);
@@ -723,7 +802,7 @@ void GameLoop(int iControl)
  *
  * This function has no return value.
  */
-void Update()
+void Update(void)
 {
    conn_t*pstConn,*pstUser,*pstConnNext;
    body_t*pstBody,*pstBody2;
@@ -911,7 +990,7 @@ void TrainStat(conn_t*pstConn,char*szTxt,int iStat)
  */
 char*StatusName(body_t*pstBody)
 {
-   int iStatus=pstBody->iWin+pstBody->iKill-pstBody->iLoss;
+   long long iStatus=(long long)pstBody->iWin+pstBody->iKill-pstBody->iLoss;
 
    /* Make sure iStatus is in the range 0 to 50 */
    iStatus=iStatus<0?0:iStatus>50?50:iStatus;
@@ -952,6 +1031,26 @@ conn_t*FindPerson(char*szTxt)
    return NULL; /* The person was not found */
 }
 
+/* Remove both ends of an unaccepted challenge before it is replaced or quit. */
+void ClearChallenge(conn_t*pstConn)
+{
+   conn_t *pstOther;
+
+   if(!pstConn->pstBody)
+      return;
+   pstOther=pstConn->pstBody->pstOpponent;
+   if(pstOther&&pstOther->pstBody&&
+      pstOther->pstBody->pstOpponent==pstConn)
+   {
+      pstOther->pstBody->pstOpponent=NULL;
+      if(pstOther->eStatus==CHALLENGER)
+         pstOther->eStatus=GLADIATOR;
+   }
+   pstConn->pstBody->pstOpponent=NULL;
+   if(pstConn->eStatus==CHALLENGER)
+      pstConn->eStatus=GLADIATOR;
+}
+
 
 /* Function: Save
  *
@@ -965,14 +1064,75 @@ conn_t*FindPerson(char*szTxt)
  */
 void Save(body_t*pstBody)
 {
-   /* Try and open the file */
-   if((pFile=fopen(pstBody->a_chName,"wb")))
-   {
-      /* Save the player file */
-      fwrite(pstBody,sizeof(body_t),1,pFile);
+   body_t stSaved=*pstBody;
+   char a_chTemporary[64];
+   FILE *pPlayerFile;
+   int iFd;
+   bool bSaved;
 
-      /* Close the player file */
-      fclose(pFile);
+   if(!memchr(pstBody->a_chName,'\0',sizeof(pstBody->a_chName))||
+      !ValidPlayerName(pstBody->a_chName))
+   {
+      Log("Cannot save a character with an invalid name.\n");
+      return;
    }
+
+   /* Retain the legacy layout, but never persist a live process pointer. */
+   stSaved.pstOpponent=NULL;
+   snprintf(a_chTemporary,sizeof(a_chTemporary),".%s.XXXXXX",
+      pstBody->a_chName);
+   iFd=mkstemp(a_chTemporary);
+   if(iFd<0)
+   {
+      Log("Cannot create temporary player save: %s\n",strerror(errno));
+      return;
+   }
+   pPlayerFile=fdopen(iFd,"wb");
+   if(!pPlayerFile)
+   {
+      close(iFd);
+      remove(a_chTemporary);
+      Log("Cannot open temporary player save.\n");
+      return;
+   }
+   bSaved=fwrite(&stSaved,sizeof(stSaved),1,pPlayerFile)==1&&
+      fflush(pPlayerFile)==0&&fsync(iFd)==0;
+   if(fclose(pPlayerFile)!=0)
+      bSaved=FALSE;
+
+   /* The original player file remains intact unless the full save succeeds. */
+   if(!bSaved||rename(a_chTemporary,pstBody->a_chName)!=0)
+   {
+      Log("Save failed for %s; original player file retained.\n",
+         pstBody->a_chName);
+      remove(a_chTemporary);
+   }
+}
+
+bool ValidPlayerName(const char*szName)
+{
+   size_t i;
+   size_t iLength=strlen(szName);
+
+   if(iLength<3||iLength>15)
+      return FALSE;
+   for(i=0;i<iLength;i++)
+      if(!isalpha((unsigned char)szName[i]))
+         return FALSE;
+   return TRUE;
+}
+
+bool ValidPlayer(const body_t*pstBody,const char*szName)
+{
+   int i;
+
+   if(!memchr(pstBody->a_chName,'\0',sizeof(pstBody->a_chName))||
+      strcmp(pstBody->a_chName,szName)!=0)
+      return FALSE;
+   for(i=STR;i<=WIT;i++)
+      if(pstBody->iStats[i]<1||pstBody->iStats[i]>9)
+         return FALSE;
+   return pstBody->iWin>=0&&pstBody->iLoss>=0&&pstBody->iKill>=0&&
+      pstBody->iDam>=0&&pstBody->iDam<=HEALTH(pstBody);
 }
 
