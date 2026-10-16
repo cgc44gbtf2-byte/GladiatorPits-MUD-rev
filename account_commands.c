@@ -258,6 +258,7 @@ static int AccountPoll(void)
          if(connection->connection_token==result.token)
             break;
       if(connection&&connection->auth_stage==AUTH_WAIT&&!connection->bClosing&&
+         !connection->bWriteFailed&&
          result.request_token!=0&&connection->auth_request_token==result.request_token)
       {
          /* Check before cancellation clears the deadline, for every operation. */

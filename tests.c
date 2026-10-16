@@ -1191,6 +1191,108 @@ static void TestCompletedAuthenticationDeadlines(void)
    pstFirstConn=NULL;
 }
 
+static void TestFailedOutputAuthorization(void)
+{
+   account_session owner;
+   conn_t connection;
+   staff_audit history[1];
+   char oversized[MAX_BUF];
+   int sockets[2],operation,transport,before,after;
+   int64_t audit_id;
+   Check(AccountRegister("Outputowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Outputowner",ROLE_OWNER),"output-proof owner fixture");
+   memset(oversized,'X',sizeof(oversized)-1);
+   oversized[sizeof(oversized)-1]='\0';
+   for(operation=4;operation>=1;operation--)
+      for(transport=0;transport<3;transport++)
+      {
+         Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0&&
+            fcntl(sockets[0],F_SETFL,O_NONBLOCK)==0,"output-proof socket fixture");
+         connection=stConnEmpty;
+         connection.iSocket=sockets[0];
+         connection.eStatus=CROWD;
+         connection.connection_token=40001;
+         connection.iIp=9000;
+         strcpy(connection.account_name,operation==4?"Outputowner":"Regtest");
+         if(operation>=3)
+            connection.account=operation==4?owner:regression_account;
+         if(operation==4)
+         {
+            Check(AccountSetRole("Regtest",ROLE_PLAYER),"output-proof target reset");
+            connection.staff_target=regression_account.id;
+            connection.staff_operation=1;
+            connection.staff_value=ROLE_BUILDER;
+         }
+         pstFirstConn=&connection;
+         memset(auth_jobs,0,sizeof(auth_jobs));
+         memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+         auth_global_attempts=0;
+         AccountQueue(&connection,operation,"regression-test-password-only");
+         Check(auth_jobs[0].state==1&&connection.auth_stage==AUTH_WAIT,
+            "output-proof request queues before transport failure");
+         before=AccountStaffAudit(owner,0,history,1);
+         Check(before>=0,"output-proof audit snapshot");
+         audit_id=before?history[0].id:0;
+         if(transport==1)
+            connection.bClosing=TRUE;
+         else if(transport==2)
+         {
+            while(write(sockets[0],oversized,sizeof(oversized)-1)>0)
+               ;
+            Check(errno==EAGAIN||errno==EWOULDBLOCK,"output-proof socket backpressure");
+            PutOutput(&connection,TO_USER,"%s",oversized);
+            Check(connection.bWriteFailed!=FALSE,"actual queue overflow marks output failure");
+         }
+         auth_jobs[0].state=3;
+         auth_jobs[0].ok=1;
+         auth_jobs[0].session=operation==4?owner:regression_account;
+         AccountPoll();
+         if(operation==4)
+            Check(AccountSessionRole(regression_account)==
+               (transport==0?ROLE_BUILDER:ROLE_PLAYER),
+               "closing or failed-output staff proof cannot mutate roles");
+         Check(connection.auth_stage==(transport==0?AUTH_IDLE:AUTH_WAIT)&&
+            (transport==0?connection.auth_request_token==0:
+               connection.auth_request_token!=0),
+            "completed proof applies only to a healthy transport");
+         if(operation<=2)
+            Check(connection.account.id==(transport==0?regression_account.id:0),
+               "failed-output registration/login result cannot grant a session");
+         if(operation==3&&transport!=0)
+            Check(!OutputContains(&connection,"Password changed"),
+               "failed-output password result is not consumed as a successful reply");
+         after=AccountStaffAudit(owner,0,history,1);
+         Check(after>=0&&((operation==4&&transport==0)?
+            (after>0&&history[0].id>audit_id):
+            ((after?history[0].id:0)==audit_id)),
+            "discarded proof leaves staff mutation history unchanged");
+         Check(auth_jobs[0].state==0&&auth_jobs[0].request_token==0,
+            "discarded completed job is wiped rather than replayable");
+         close(sockets[0]);
+         close(sockets[1]);
+      }
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"direct staff-boundary sockets");
+   for(transport=0;transport<3;transport++)
+   {
+      connection=stConnEmpty;
+      connection.iSocket=sockets[0];
+      connection.account=owner;
+      connection.bClosing=transport==1;
+      connection.bWriteFailed=transport==2;
+      pstFirstConn=&connection;
+      Check(AccountSetRole("Regtest",ROLE_PLAYER),"direct staff-boundary target reset");
+      StaffApply(&connection,regression_account.id,1,ROLE_BUILDER);
+      Check(AccountSessionRole(regression_account)==
+         (transport==0?ROLE_BUILDER:ROLE_PLAYER),
+         "staff mutation boundary independently rejects closing/failed transport");
+   }
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore output-proof gameplay role");
+   close(sockets[0]);
+   close(sockets[1]);
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
 static void TestProgressionCounterLimits(void)
 {
    int fight,i;
@@ -1514,6 +1616,7 @@ int main(void)
    TestInGameStaff();
    TestAuthenticationReplay();
    TestCompletedAuthenticationDeadlines();
+   TestFailedOutputAuthorization();
    TestProgressionCounterLimits();
    TestTelnetInput();
    TestExpiredAuthenticationInput();

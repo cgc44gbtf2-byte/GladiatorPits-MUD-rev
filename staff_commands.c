@@ -36,7 +36,11 @@ static void StaffApply(conn_t *connection,int64_t target,int operation,int value
 {
    int ok=0;
    char probe;
-   ssize_t available=recv(connection->iSocket,&probe,1,MSG_PEEK|MSG_DONTWAIT);
+   ssize_t available;
+   /* A connected socket may already be scheduled for failed-output cleanup. */
+   if(connection->bClosing||connection->bWriteFailed)
+      return;
+   available=recv(connection->iSocket,&probe,1,MSG_PEEK|MSG_DONTWAIT);
    if(available==0||(available<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK))
    {
       connection->bClosing=TRUE;
