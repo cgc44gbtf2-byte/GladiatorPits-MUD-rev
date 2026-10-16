@@ -116,6 +116,32 @@ static void StaffTests(account_session builder,account_session owner)
       AccountStaffList(moderator,0,rows,50)==-1,"disabled staff session cannot read data");
 }
 
+static void DisabledOwnerCleanup(void)
+{
+   account_session disabled,enabled;
+   int before=Scalar("SELECT count(*) FROM audit WHERE event LIKE 'local_role_changed:%'");
+   Check(AccountRegister("Disabledowner",test_password,&disabled)&&
+      AccountSetRole("Disabledowner",ROLE_OWNER),"disabled owner cleanup fixture");
+   Check(AccountSetDisabled("Disabledowner",1)&&
+      AccountSessionRole(disabled)==ROLE_NONE,"disabled owner session revoked");
+   Check(!AccountSetRole("Bob",ROLE_PLAYER)&&!AccountSetDisabled("Bob",1),
+      "disabled owner does not count toward last-active-owner protection");
+   Check(AccountSetRole("Disabledowner",ROLE_PLAYER),
+      "local operator can demote an already-disabled owner");
+   Check(Scalar("SELECT role='player' AND disabled=1 FROM accounts "
+      "WHERE name='Disabledowner'")==1&&
+      Scalar("SELECT count(*) FROM accounts WHERE role='owner' AND disabled=0")==1,
+      "disabled owner cleanup leaves access disabled and the active owner intact");
+   Check(Scalar("SELECT count(*) FROM audit WHERE event LIKE 'local_role_changed:%'")==before+2,
+      "owner assignment and disabled-owner demotion are both audited");
+   Check(AccountSetDisabled("Disabledowner",0)&&
+      AccountSessionRole(disabled)==ROLE_NONE,"cleanup/re-enable cannot revive an old session");
+   Check(AccountLogin("Disabledowner",test_password,&enabled)&&
+      AccountSessionRole(enabled)==ROLE_PLAYER,"fresh login receives only the cleaned-up role");
+   Check(!AccountSetRole("Bob",ROLE_PLAYER)&&!AccountSetDisabled("Bob",1),
+      "last active owner stays protected after cleanup and re-enable");
+}
+
 int main(void)
 {
    account_session alice,bob,login,old;
@@ -199,6 +225,7 @@ int main(void)
    Check(Scalar("SELECT count(*) FROM audit WHERE event='password_changed'")==1,
       "security changes have audit records");
    StaffTests(login,bob);
+   DisabledOwnerCleanup();
    AccountsClose();
    Check(chmod("test-accounts.sqlite3",0644)==0,"insecure-mode fixture");
    Check(!AccountsOpen("test-accounts.sqlite3"),"publicly readable database rejected");

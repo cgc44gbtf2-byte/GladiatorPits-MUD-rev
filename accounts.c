@@ -355,7 +355,7 @@ static int LocalAccountChange(const char *name,const char *role,int disabled)
    if(Execute("BEGIN IMMEDIATE"))
    {
       statement=Prepare(role?
-         "UPDATE accounts SET role=? WHERE name=? AND (role!='owner' OR ?='owner' "
+         "UPDATE accounts SET role=? WHERE name=? AND (role!='owner' OR ?='owner' OR disabled=1 "
          "OR (SELECT count(*) FROM accounts WHERE role='owner' AND disabled=0)>1)":
          "UPDATE accounts SET disabled=?,epoch=epoch+1 WHERE name=? AND "
          "(role!='owner' OR ?=0 OR "

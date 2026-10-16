@@ -82,6 +82,19 @@ An initial invocation overriding `CFLAGS` without `-std=c99` also failed at the
 legacy `bool` typedef under GCC's modern default dialect. Supplying the documented
 language flag allowed the actual regression to run; a separate build fix follows.
 
+### Increment 2: disabled owner cleanup
+
+Reproduced: `FAIL: local operator can demote an already-disabled owner`.
+The local role-change predicate counted active owners correctly but also blocked
+demoting a disabled owner when only one other enabled owner remained. It now
+permits that already-disabled target, matching the remote staff API's existing
+last-active-owner rule. It does not permit removing the last enabled owner.
+
+Nine account checks cover the disabled session, both attempts to remove the last
+active owner, audited demotion, retained disabled state and safe re-enablement with
+fresh player-only credentials. GCC optimized strict C99: **961 + 129 checks and
+both TCP suites passed**.
+
 Further increments and final matrix results pending.
 
 ## Limits
