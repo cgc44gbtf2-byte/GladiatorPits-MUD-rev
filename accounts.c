@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Account metadata is deliberately separate from the historical player ABI. */
 #define _POSIX_C_SOURCE 200809L
 #include "accounts.h"
@@ -46,6 +47,20 @@ static int Audit(const char *event,int64_t id)
    }
    sqlite3_finalize(statement);
    return ok;
+}
+
+/* Equal-cost missing-account verification, without a fixed password-like input.
+ * This hash is never attached to an account or used to grant a session. */
+static int CreateDummyHash(void)
+{
+   char input[32];
+   int result;
+   randombytes_buf(input,sizeof(input));
+   result=crypto_pwhash_str_alg(dummy_hash,input,(unsigned long long)sizeof(input),
+      crypto_pwhash_OPSLIMIT_INTERACTIVE,crypto_pwhash_MEMLIMIT_INTERACTIVE,
+      crypto_pwhash_ALG_ARGON2ID13);
+   sodium_memzero(input,sizeof(input));
+   return result==0;
 }
 
 int AccountsOpen(const char *path)
@@ -99,9 +114,7 @@ int AccountsOpen(const char *path)
       "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
       "PRAGMA user_version=2;")||!Execute("COMMIT"))
       goto failed;
-   if(crypto_pwhash_str_alg(dummy_hash,"dummy-not-a-login-password",26,
-      crypto_pwhash_OPSLIMIT_INTERACTIVE,crypto_pwhash_MEMLIMIT_INTERACTIVE,
-      crypto_pwhash_ALG_ARGON2ID13)!=0)
+   if(!CreateDummyHash())
       goto failed;
    return 1;
 failed:
@@ -355,7 +368,7 @@ static int LocalAccountChange(const char *name,const char *role,int disabled)
    if(Execute("BEGIN IMMEDIATE"))
    {
       statement=Prepare(role?
-         "UPDATE accounts SET role=? WHERE name=? AND (role!='owner' OR ?='owner' "
+         "UPDATE accounts SET role=? WHERE name=? AND (role!='owner' OR ?='owner' OR disabled=1 "
          "OR (SELECT count(*) FROM accounts WHERE role='owner' AND disabled=0)>1)":
          "UPDATE accounts SET disabled=?,epoch=epoch+1 WHERE name=? AND "
          "(role!='owner' OR ?=0 OR "

@@ -22,7 +22,7 @@ parallel, with a 15-minute timeout per job; newer runs for the same ref cancel
 older ones.
 
 Each job uses GitHub-hosted `ubuntu-24.04`, installs the distro's supported
-build tools, libsodium/SQLite development headers and Python, and prints tool
+build tools, libsodium/SQLite development headers, Python and OpenSSL, and prints tool
 and library versions. Distro versions may differ from local versions and
 receive security updates; this is compatibility coverage, not a locked build
 environment. No shared build/dependency cache is used.
@@ -42,6 +42,12 @@ uses strict warnings with `-Werror`, builds `glad` and `glad-admin`, and runs
 checks, leak detection and fail-fast undefined-behavior reporting. Tests use
 disposable fixtures; TCP suites use loopback with ephemeral server ports.
 
+Current release-candidate coverage is 1,111 game/runtime, 159 account/security,
+479 storage/recovery and 19 source-artifact regressions, plus five TCP/TLS suites.
+The latter include trusted PROXY admission and a certificate-verified TLS
+forwarding fixture; OpenSSL only generates disposable test certificates.
+See `HOSTING.md` and `RELEASE.md`. Actual Mudlet/HAProxy deployment remains separate.
+
 ## Security boundaries
 
 - The only third-party action is `actions/checkout`, pinned to the full commit
@@ -54,6 +60,9 @@ disposable fixtures; TCP suites use loopback with ephemeral server ports.
   requirement is a separate consequential repository setting.
 
 ## Verification and failures
+
+The following counts describe the initial CI introduction, not current coverage.
+Current-head hosted verification is recorded in PR #6 after the run completes.
 
 - `actionlint` 1.7.7, ShellCheck 0.10.0 and `bash -n` pass. Three invalid
   compiler/mode cases exit with status 2 before running build/cleanup commands.

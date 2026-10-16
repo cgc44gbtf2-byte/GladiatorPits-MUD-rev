@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /******************************************************************************
  Program     : The Gladiator Pits.
  Author      : Richard Woolcock (aka KaVir).
@@ -44,6 +45,7 @@
 #include <sodium.h>
 #include "accounts.h"
 #include "player_record.h"
+#include "player_storage.h"
 
 /******************************************************************************
  Required literals.
@@ -75,7 +77,9 @@
 #define SPEED(p)   (10-(((p->iStats[WIT]*2)+p->iStats[DEX])/3))
 #define ROOM(p)    (p->pstBody?p->pstBody->iRoom:0)
 #define NAME(p)    (p->pstBody?p->pstBody->a_chName:"Someone in the crowd")
-#define D10        (1+(int)(10.0*rand()/(RAND_MAX+1.0)))
+#ifndef D10
+#define D10        RollD10()
+#endif
 
 /******************************************************************************
  Required types.
@@ -128,9 +132,16 @@ void    Log             (char*szTxt,...);
 void    TrainStat       (conn_t*pstConn,char*szTxt,int iStat);
 char   *StatusName      (body_t*pstBody);
 conn_t *FindPerson      (char*szTxt);
-void    Save            (body_t*pstBody);
+int     Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
 static void IncrementProgression(int *counter,const char *name,const char *field);
+static int RollD10(void);
+static void ReleaseConnections(void);
+static void StorageFailure(const char *operation);
+static time_t CombatClock(void);
+static int CombatPulseDue(time_t last,time_t now);
+static int CombatPendingDisconnect(const conn_t *first,const conn_t *second);
+static int ProxyExpired(const conn_t *connection);
 
 /******************************************************************************
  Required global variables.
@@ -146,6 +157,11 @@ static struct connection
    int      iSocket,iInLen,iOutLen;
    uint32_t iIp;
    bool     bWriteFailed,bClosing,bInputTooLong;
+   bool proxy_pending,proxy_ipv6;
+   unsigned char proxy_address[16];
+   char proxy_header[108];
+   size_t proxy_length;
+   time_t proxy_deadline;
    account_session account;
    uint64_t connection_token,auth_request_token;
    int telnet_state;
@@ -163,6 +179,7 @@ static struct connection
 conn_t     *pstFirstConn=NULL; /* Connection list */
 fd_set      a_sFd;             /* Array of socket flags */
 bool        bShutdown=FALSE;   /* When TRUE, shut mud down */
+static bool bStorageFailed=FALSE;
 
 extern const cmd_table_t kstCmdTable[];
 
@@ -176,6 +193,7 @@ static void StaffApply(conn_t *connection,int64_t target,int operation,int value
 #include "commands.c"
 #include "staff_commands.c"
 #include "telnet.c"
+#include "proxy.c"
 
 /* Create the command table */
 const cmd_table_t kstCmdTable[] =
@@ -232,12 +250,26 @@ int main(void)
    /* A disconnected client must not terminate the whole server on write. */
    signal(SIGPIPE,SIG_IGN);
 
-   /* Seed the dice */
-   srand((unsigned int)time(0));
+   if(!ProxyConfigure())
+   {
+      fprintf(stderr,"Invalid GLAD_TRUSTED_PROXY: require one trusted IPv4 transport address.\n");
+      return EXIT_FAILURE;
+   }
+
+   /* Account startup initializes libsodium, including secure combat dice. */
    umask(0077);
    if(!AccountRuntimeStart())
    {
+      fprintf(stderr,"Cannot initialize private account storage/authentication worker.\n");
       Log("Cannot initialize private account storage/authentication worker.\n");
+      return EXIT_FAILURE;
+   }
+   if(!PlayerStorageOpen())
+   {
+      int error=errno;
+      fprintf(stderr,"Cannot lock/recover player storage: %s. No listener opened.\n",strerror(error));
+      Log("Cannot lock/recover player storage: %s. No listener opened.\n",strerror(error));
+      AccountRuntimeStop();
       return EXIT_FAILURE;
    }
 
@@ -245,6 +277,7 @@ int main(void)
    iControl=InitSocket();
    if(iControl<0)
    {
+      PlayerStorageClose();
       AccountRuntimeStop();
       return EXIT_FAILURE;
    }
@@ -259,9 +292,11 @@ int main(void)
    /* Close the main socket */
    close(iControl);
    AccountRuntimeStop();
+   ReleaseConnections();
+   PlayerStorageClose();
 
    /* Exit the program */
-   return 0;
+   return bStorageFailed?EXIT_FAILURE:EXIT_SUCCESS;
 }
 
 
@@ -386,6 +421,15 @@ bool GetInput(conn_t*pstConn)
    /* Process every complete line; TCP may deliver several in one read. */
    for(i=0;i<(int)iInput;i++)
    {
+      if(pstConn->proxy_pending)
+      {
+         if(!ProxyData(pstConn,(unsigned char)a_chBuf[i]))
+         {
+            sodium_memzero(a_chBuf,sizeof(a_chBuf));
+            return FALSE;
+         }
+         continue;
+      }
       if(!TelnetData(pstConn,(unsigned char)a_chBuf[i]))
          continue;
       if(a_chBuf[i]=='\n')
@@ -445,6 +489,10 @@ void ParseInput(conn_t*pstConn)
 {
    char *szTxt=pstConn->a_chInBuf;
    int  i;
+   if(bStorageFailed)
+      return;
+   if(pstConn->proxy_pending)
+      return;
    if(pstConn->auth_stage!=AUTH_IDLE)
    {
       AccountInput(pstConn,pstConn->a_chInBuf);
@@ -551,6 +599,8 @@ void PutOutput(conn_t*pstConn,out_t peOut,char*szTxt,...)
 
       if(pstUser->bWriteFailed)
          continue;
+      if(pstUser->proxy_pending)
+         continue; /* Never disclose output before trusted header admission. */
       bRePrompt=FALSE;
 
       /* Determine if their prompt needs to be redrawn first */
@@ -666,6 +716,12 @@ bool NewConnection(int iSocket)
       Log("Cannot identify new connection: %s\n",strerror(errno));
       return FALSE;
    }
+   if(proxy_enabled&&ntohl(stSa.sin_addr.s_addr)!=trusted_proxy)
+   {
+      CloseSocket(iSocket);
+      Log("Rejected connection outside trusted proxy transport address.\n");
+      return FALSE;
+   }
    if(fcntl(iSocket,F_SETFL,O_NONBLOCK)<0)
    {
       CloseSocket(iSocket);
@@ -707,14 +763,16 @@ bool NewConnection(int iSocket)
 
    /* Calculate and store the ip address of the new connection */
    pstConn->iIp=ntohl(stSa.sin_addr.s_addr);
+   pstConn->proxy_pending=proxy_enabled?TRUE:FALSE;
+   if(pstConn->proxy_pending)
+      pstConn->proxy_deadline=AuthClock()+10;
 
    /* Log the connection */
    Log("Connection from %d.%d.%d.%d\n",IP(3),IP(2),IP(1),IP(0));
 
    /* Greet the new connection */
-   PutOutput(pstConn,TO_USER,"Welcome to the Gladiator Pits!\n\r");
-   PutOutput(pstConn,TO_USER,"Use register <account> or login <account> before create <character>.\n\r"
-      "Password traffic requires a TLS gateway or secure tunnel; TCP alone is not encrypted.\n\r");
+   if(!pstConn->proxy_pending)
+      GreetConnection(pstConn);
 
    /* New connection was successfully created, so return TRUE */
    return TRUE;
@@ -731,8 +789,36 @@ bool NewConnection(int iSocket)
  *
  * This function has no return value.
  */
+/* Storage destruction is shared by ordinary disconnect and orderly shutdown.
+ * It does not settle fights, save records or follow opponent pointers. */
+static void FreeConnectionStorage(conn_t *connection)
+{
+   if(connection->pstBody)
+   {
+      sodium_memzero(connection->pstBody,sizeof(*connection->pstBody));
+      free(connection->pstBody);
+   }
+   sodium_memzero(connection,sizeof(*connection));
+   free(connection);
+}
+
+static void ReleaseConnections(void)
+{
+   while(pstFirstConn)
+   {
+      conn_t *connection=pstFirstConn;
+      pstFirstConn=connection->pstNext;
+      FlushOutput(connection);
+      CloseSocket(connection->iSocket);
+      FreeConnectionStorage(connection);
+   }
+   FD_ZERO(&a_sFd);
+}
+
 void CloseConnection(conn_t*pstConn)
 {
+   if(bStorageFailed)
+      return; /* Orderly shutdown releases storage without new settlement. */
    /* Must free their body, if they've created one */
    if(pstConn->pstBody)
    {
@@ -744,16 +830,21 @@ void CloseConnection(conn_t*pstConn)
       {
          body_t*pstBody=pstConn->pstBody->pstOpponent->pstBody;
 
-         /* Always clear their opponent (in case of an unaccepted challenge) */
-         pstBody->pstOpponent=NULL;
-
          /* Check whether you quit while actually fighting (a surrender) */
          if(pstConn->eStatus==FIGHTING)
          {
-            /* Adjusts wins and losses... */
-            IncrementProgression(&pstConn->pstBody->iLoss,
-               pstConn->pstBody->a_chName,"losses");
-            IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
+            body_t winner=*pstBody,loser=*pstConn->pstBody;
+            IncrementProgression(&loser.iLoss,loser.a_chName,"losses");
+            IncrementProgression(&winner.iWin,winner.a_chName,"wins");
+            winner.iRoom=0;
+            /* Prepare both absolute outcomes before changing live state. */
+            if(!PlayerStorageCommit(&winner,&loser,NULL))
+            {
+               StorageFailure("surrender");
+               return;
+            }
+            pstBody->iWin=winner.iWin;
+            pstConn->pstBody->iLoss=loser.iLoss;
 
             /* ...stop the fighting... */
             pstConn->pstBody->pstOpponent->eStatus=GLADIATOR;
@@ -761,14 +852,12 @@ void CloseConnection(conn_t*pstConn)
             /* ...return them to the stadium... */
             pstBody->iRoom=0;
 
-            /* ...and save both you and them! */
-            Save(pstBody);
-            Save(pstConn->pstBody);
          }
+         /* Clear the reciprocal link only after settlement succeeds. */
+         pstBody->pstOpponent=NULL;
       }
 
       PutOutput(pstConn,TO_WORLD,"%s vanishes into the crowd.\n\r",pstConn->pstBody->a_chName);
-      free(pstConn->pstBody);
    }
 
    /* Have a quick flush in case there is any pending output */
@@ -786,10 +875,7 @@ void CloseConnection(conn_t*pstConn)
 
    /* Close and free the socket */
    CloseSocket(pstConn->iSocket);
-   sodium_memzero(pstConn->auth_password,sizeof(pstConn->auth_password));
-   sodium_memzero(pstConn->auth_old_password,sizeof(pstConn->auth_old_password));
-   sodium_memzero(pstConn->a_chInBuf,sizeof(pstConn->a_chInBuf));
-   free(pstConn);
+   FreeConnectionStorage(pstConn);
 }
 
 
@@ -844,11 +930,13 @@ void GameLoop(int iControl)
          continue; /* Try again if it raised an exception */
 
       /* Update pulse called every second */
-      if((time(0)-tTime)>=1/* second */)
+      if(CombatPulseDue(tTime,CombatClock()))
       {
          Update();
-         tTime=time(0);
+         tTime=CombatClock();
       }
+      if(bStorageFailed)
+         break;
 
       /* Check if iControl is in the sFd descriptor set */
       if(FD_ISSET(iControl,&sFd))
@@ -872,6 +960,8 @@ void GameLoop(int iControl)
             CloseConnection(pstConn);
          else if(FlushOutput(pstConn)<0)
             CloseConnection(pstConn);
+         if(bStorageFailed)
+            break;
       }
    }
    while (!bShutdown);
@@ -896,12 +986,36 @@ static void IncrementProgression(int *counter,const char *name,const char *field
          name,field);
 }
 
+static time_t CombatClock(void)
+{
+   return AuthClock();
+}
+
+static int CombatPulseDue(time_t last,time_t now)
+{
+   return now>last;
+}
+
+static int RollD10(void)
+{
+   return 1+(int)randombytes_uniform(10U);
+}
+
+static int CombatPendingDisconnect(const conn_t *first,const conn_t *second)
+{
+   return first->bClosing||first->bWriteFailed||
+      second->bClosing||second->bWriteFailed;
+}
+
 void Update(void)
 {
    conn_t*pstConn,*pstUser,*pstConnNext;
    body_t*pstBody,*pstBody2;
    char*szYou,*szThem;
    int iDam,iResult;
+
+   if(bStorageFailed)
+      return;
 
    /* Loop through all of the connections */
    for(pstConn=pstFirstConn;pstConn;pstConn=pstConnNext)
@@ -914,6 +1028,11 @@ void Update(void)
       /* Insert stuff like combat, etc, here */
       if(pstConn->eStatus==FIGHTING)
       {
+         pstUser=pstBody->pstOpponent;
+         /* The loop closes marked connections after this pulse. Neither end
+          * may turn that pending surrender into a lethal attack meanwhile. */
+         if(CombatPendingDisconnect(pstConn,pstUser))
+            continue;
          if(++pstBody->iSpeed>=SPEED(pstBody))
          {
             /* Reset the speed counter (three second recovery time) */
@@ -954,20 +1073,29 @@ void Update(void)
             PutOutput(pstConn,TO_USER,"You %s your opponent!\n\r",szYou);
             PutOutput(pstUser,TO_USER,"Your opponent %s you!\n\r",szThem);
 
-            /* Inflict the damage */
-            pstBody2->iDam+=iDam;
+            /* Enqueuing those messages can discover a failed/slow socket. */
+            if(CombatPendingDisconnect(pstConn,pstUser))
+               continue;
 
             /* See if you've killed them */
-            if(pstBody2->iDam>HEALTH(pstBody2))
+            if(pstBody2->iDam+iDam>HEALTH(pstBody2))
             {
+               body_t winner=*pstBody;
+               IncrementProgression(&winner.iWin,winner.a_chName,"wins");
+               IncrementProgression(&winner.iKill,winner.a_chName,"kills");
+               winner.iRoom=0;
+               if(!PlayerStorageCommit(&winner,NULL,pstBody2->a_chName))
+               {
+                  StorageFailure("death");
+                  return;
+               }
+
                /* Send the victory message */
                PutOutput(pstConn,TO_ALL,"[%s has killed %s in the arena!]\n\r",
                   pstBody->a_chName,pstBody2->a_chName);
 
-               /* Wipe the loser's player file */
-               remove(pstBody2->a_chName);
-
                /* Free the loser's body */
+               sodium_memzero(pstBody2,sizeof(*pstBody2));
                free(pstBody2);
 
                /* Refresh the loser's connection structure */
@@ -975,8 +1103,8 @@ void Update(void)
                pstUser->eStatus=CROWD;
 
                /* Reward the victor... */
-               IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
-               IncrementProgression(&pstBody->iKill,pstBody->a_chName,"kills");
+               pstBody->iWin=winner.iWin;
+               pstBody->iKill=winner.iKill;
 
                /* ...stop them fighting... */
                pstBody->pstOpponent=NULL;
@@ -985,9 +1113,9 @@ void Update(void)
                /* ...return them to the stadium... */
                pstBody->iRoom=0;
 
-               /* ...and save them! */
-               Save(pstBody);
             }
+            else
+               pstBody2->iDam+=iDam;
          }
       }
    }
@@ -1146,59 +1274,30 @@ void ClearChallenge(conn_t*pstConn)
 }
 
 
-/* Function: Save
- *
- * This function saves the specified body.
- *
- * The function takes one parameter, as follows:
- *
- * pstBody: A pointer to the body to be saved.
- *
- * This function has no return value.
- */
-void Save(body_t*pstBody)
+/* Halt without triggering ordinary disconnect/surrender writes. */
+static void StorageFailure(const char *operation)
 {
-   body_t stSaved=*pstBody;
-   char a_chTemporary[64];
-   FILE *pPlayerFile;
-   int iFd;
-   bool bSaved;
+   int error=errno;
+   /* Disk-full may also prevent log.txt writes; retain a console diagnostic. */
+   fprintf(stderr,"Player storage %s failed: %s. Gameplay halted; recovery required.\n",
+      operation,strerror(error));
+   Log("Player storage %s failed: %s. Gameplay halted; recovery required.\n",
+      operation,strerror(error));
+   bStorageFailed=TRUE;
+   bShutdown=TRUE;
+   PutOutput(NULL,TO_ALL,
+      "Storage failure: gameplay halted. Reconnect after operator recovery; "
+      "pending results may be recovered.\n\r");
+   errno=error;
+}
 
-   if(!memchr(pstBody->a_chName,'\0',sizeof(pstBody->a_chName))||
-      !ValidPlayerName(pstBody->a_chName))
+/* Returns nonzero only after the complete journaled save is durable. */
+int Save(body_t*pstBody)
+{
+   if(!PlayerStorageCommit(pstBody,NULL,NULL))
    {
-      Log("Cannot save a character with an invalid name.\n");
-      return;
+      StorageFailure("save");
+      return 0;
    }
-
-   /* Retain the legacy layout, but never persist a live process pointer. */
-   stSaved.pstOpponent=NULL;
-   snprintf(a_chTemporary,sizeof(a_chTemporary),".%s.XXXXXX",
-      pstBody->a_chName);
-   iFd=mkstemp(a_chTemporary);
-   if(iFd<0)
-   {
-      Log("Cannot create temporary player save: %s\n",strerror(errno));
-      return;
-   }
-   pPlayerFile=fdopen(iFd,"wb");
-   if(!pPlayerFile)
-   {
-      close(iFd);
-      remove(a_chTemporary);
-      Log("Cannot open temporary player save.\n");
-      return;
-   }
-   bSaved=fwrite(&stSaved,sizeof(stSaved),1,pPlayerFile)==1&&
-      fflush(pPlayerFile)==0&&fsync(iFd)==0;
-   if(fclose(pPlayerFile)!=0)
-      bSaved=FALSE;
-
-   /* The original player file remains intact unless the full save succeeds. */
-   if(!bSaved||rename(a_chTemporary,pstBody->a_chName)!=0)
-   {
-      Log("Save failed for %s; original player file retained.\n",
-         pstBody->a_chName);
-      remove(a_chTemporary);
-   }
+   return 1;
 }

@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 #include "accounts.h"
 #include <stdio.h>
 #include <string.h>

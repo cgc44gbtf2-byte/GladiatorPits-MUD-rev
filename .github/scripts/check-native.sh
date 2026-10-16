@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
 # Shared CI/local entry point; never runs against a live game data directory.
 set -euo pipefail
 
@@ -9,9 +10,10 @@ case "$compiler" in
   *) printf '%s\n' 'Set CC to gcc or clang.' >&2; exit 2 ;;
 esac
 case "$mode" in
-  optimized) flags='-O2 -std=c99' ;;
+   # Deliberately omit -std: the Makefile must preserve its required dialect.
+   optimized) flags='-O2' ;;
   sanitizers)
-    flags='-O1 -g -std=c99 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer'
+     flags='-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer'
     ;;
   *) printf '%s\n' 'Set BUILD_MODE to optimized or sanitizers.' >&2; exit 2 ;;
 esac

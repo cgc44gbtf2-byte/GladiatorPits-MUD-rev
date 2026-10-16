@@ -1,7 +1,10 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /*
  * Small regression tests for the existing Gladiator Pits rules.
  * Run in an isolated directory because the game stores player files there.
  */
+static int RegressionD10(void);
+#define D10 RegressionD10()
 #define main glad_server_main
 #include "glad.c"
 #undef main
@@ -14,6 +17,18 @@ static body_t test_body_one;
 static body_t test_body_two;
 static int tests_run;
 static account_session regression_account;
+static int fixed_d10,combat_rolls;
+static int OutputContains(conn_t *pstConn,const char *szText);
+
+static int RegressionD10(void)
+{
+   if(fixed_d10)
+   {
+      combat_rolls++;
+      return fixed_d10;
+   }
+   return RollD10();
+}
 
 static void Check(int condition, const char *message)
 {
@@ -23,6 +38,56 @@ static void Check(int condition, const char *message)
       exit(EXIT_FAILURE);
    }
    tests_run++;
+}
+
+static void TestTrustedProxyHeaders(void)
+{
+   conn_t connection=stConnEmpty;
+   const char *header="PROXY TCP6 2001:db8::1 2001:db8::2 12345 4000\r\n";
+   conn_t *previous=pstFirstConn;
+   size_t index;
+   pstFirstConn=&connection;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()+10;
+   for(index=0;header[index];index++)
+   {
+      Check(ProxyData(&connection,(unsigned char)header[index]),"bytewise PROXY header accepted");
+      if(header[index+1])
+         Check(connection.proxy_pending&&connection.iOutLen==0,
+            "fragmented header neither admits nor emits a banner early");
+   }
+   Check(!connection.proxy_pending&&connection.proxy_ipv6&&
+      OutputContains(&connection,"Welcome"),"IPv6 proxy header admits once");
+   Check(connection.proxy_length==0&&connection.proxy_header[0]=='\0',
+      "accepted proxy header buffer is cleared");
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   for(index=0;index<5;index++)
+      Check(AuthRateAllowedKey(connection.proxy_address),"IPv6 peer budget available");
+   Check(!AuthRateAllowedKey(connection.proxy_address),"IPv6 sixth attempt limited");
+   connection.proxy_address[15]++;
+   Check(AuthRateAllowedKey(connection.proxy_address),"full IPv6 address keys are independent");
+   connection=stConnEmpty;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()-1;
+   Check(ProxyExpired(&connection)&&!ProxyData(&connection,'P'),
+      "expired proxy header rejects new data at input time");
+   connection=stConnEmpty;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()+10;
+   memset(connection.proxy_header,'X',sizeof(connection.proxy_header));
+   connection.proxy_length=sizeof(connection.proxy_header)-1;
+   Check(!ProxyData(&connection,'X'),"proxy header cap checked before write");
+   connection=stConnEmpty;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()+10;
+   strcpy(connection.a_chInBuf,"register Bypassed");
+   ParseInput(&connection);
+   Check(connection.auth_stage==AUTH_IDLE&&connection.iOutLen==0,
+      "command dispatch cannot bypass pending proxy admission");
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   pstFirstConn=previous;
 }
 
 static void ResetWorld(void)
@@ -62,6 +127,391 @@ static int StatTotal(const body_t *pstBody)
    for (i = STR; i <= WIT; i++)
       iTotal += pstBody->iStats[i];
    return iTotal;
+}
+
+static conn_t *HeapCombatPair(void)
+{
+   conn_t *first=calloc(1,sizeof(*first)),*second=calloc(1,sizeof(*second));
+   int i;
+   Check(first&&second,"combat lifecycle connection allocations");
+   first->pstBody=calloc(1,sizeof(*first->pstBody));
+   second->pstBody=calloc(1,sizeof(*second->pstBody));
+   Check(first->pstBody&&second->pstBody,"combat lifecycle body allocations");
+   strcpy(first->pstBody->a_chName,"Attacker");
+   strcpy(second->pstBody->a_chName,"Defender");
+   for(i=STR;i<=WIT;i++)
+      first->pstBody->iStats[i]=second->pstBody->iStats[i]=1;
+   first->iSocket=second->iSocket=-1;
+   first->account=second->account=regression_account;
+   first->eStatus=second->eStatus=GLADIATOR;
+   first->pstNext=second;
+   second->pstPrev=first;
+   pstFirstConn=first;
+   FD_ZERO(&a_sFd);
+   return first;
+}
+
+static void TestCombatPendingDisconnect(void)
+{
+   int variant,i;
+   saved_character saved;
+   for(variant=0;variant<6;variant++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      conn_t *departing=(variant&1)?second:first;
+      conn_t *remaining=departing==first?second:first;
+      char departed_name[16];
+      strcpy(departed_name,departing->pstBody->a_chName);
+      for(i=STR;i<=WIT;i++)
+         first->pstBody->iStats[i]=9;
+      Save(first->pstBody);
+      Save(second->pstBody);
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      if(variant<2)
+         departing->bClosing=TRUE;
+      else if(variant<4)
+         departing->bWriteFailed=TRUE;
+      else
+      {
+         /* Trigger a real failed FlushOutput during attack-message enqueue. */
+         memset(departing->a_chOutBuf,'x',MAX_BUF-2);
+         departing->iOutLen=MAX_BUF-2;
+      }
+      Update();
+      Check(first->pstBody&&second->pstBody&&first->pstBody->iDam==0&&
+         second->pstBody->iDam==0&&first->pstBody->iWin==0&&
+         first->pstBody->iKill==0&&second->pstBody->iWin==0,
+         "pending disconnect cannot inflict a lethal hit before surrender cleanup");
+      Check(CharacterInspect("Defender",&saved)==1&&saved.damage==0,
+         "pending disconnect never deletes the opponent's persisted record");
+      if(variant>=4)
+         Check(departing->bWriteFailed!=FALSE,"attack-message failure is detected before committing damage");
+      CloseConnection(departing);
+      Check(pstFirstConn==remaining&&remaining->pstBody->iWin==1&&
+         remaining->pstBody->iKill==0&&remaining->pstBody->iRoom==0&&
+         remaining->pstBody->pstOpponent==NULL&&remaining->eStatus==GLADIATOR,
+         "closing either fighter awards one surrender win, no kill, and clears links");
+      Check(CharacterInspect(departed_name,&saved)==1&&saved.losses==1,
+         "departing fighter retains a valid record with one surrender loss");
+      CloseConnection(remaining);
+      Check(pstFirstConn==NULL,"combat disconnect fixtures release every connection");
+      unlink("Attacker");
+      unlink("Defender");
+   }
+}
+
+static void FinishHeapCombat(void)
+{
+   while(pstFirstConn)
+      CloseConnection(pstFirstConn);
+   unlink("Attacker");
+   unlink("Defender");
+   fixed_d10=0;
+}
+
+static void TestChallengeDisconnectAdmission(void)
+{
+   int accepting,variant;
+   for(accepting=1;accepting>=0;accepting--)
+      for(variant=0;variant<(accepting?8:6);variant++)
+      {
+         conn_t *first=HeapCombatPair(),*second=first->pstNext;
+         conn_t *actor=accepting?second:first,*peer=accepting?first:second;
+         conn_t *departing=(variant&1)?peer:actor;
+         conn_t *remaining=departing==first?second:first;
+         saved_character saved;
+         int unchanged;
+         first->pstBody->iDam=2;
+         second->pstBody->iDam=3;
+         first->pstBody->iSpeed=4;
+         second->pstBody->iSpeed=5;
+         Save(first->pstBody);
+         Save(second->pstBody);
+         if(accepting)
+            SetInput(first,"challenge Defender");
+         first->iOutLen=second->iOutLen=0;
+         if(variant<2)
+            departing->bClosing=TRUE;
+         else if(variant<4)
+            departing->bWriteFailed=TRUE;
+         else
+         {
+            /* The final two acceptance cases fail only on the broadcast,
+             * after the individual message has filled the queue exactly. */
+            size_t length=variant<6?1:
+               strlen(departing==actor?"Ok.\n\r":"Defender accepts your challenge!\n\r");
+            departing->iOutLen=MAX_BUF-1-(int)length;
+            memset(departing->a_chOutBuf,'x',(size_t)departing->iOutLen);
+         }
+         SetInput(actor,accepting?"accept":"challenge Defender");
+         unchanged=first->pstBody->iDam==2&&second->pstBody->iDam==3&&
+            first->pstBody->iSpeed==4&&second->pstBody->iSpeed==5&&
+            first->pstBody->iRoom==0&&second->pstBody->iRoom==0&&
+            first->eStatus==(accepting?CHALLENGER:GLADIATOR)&&
+            second->eStatus==GLADIATOR&&
+            first->pstBody->pstOpponent==(accepting?second:NULL)&&
+            second->pstBody->pstOpponent==(accepting?first:NULL);
+         if(variant>=4)
+            Check(departing->bWriteFailed!=FALSE,
+               "challenge admission fixture discovers an actual output failure");
+         CloseConnection(departing);
+         Check(remaining->pstBody->iWin==0&&remaining->pstBody->iLoss==0&&
+            remaining->pstBody->iKill==0,
+            "late challenge/accept cannot fabricate a surrender win or loss");
+         Check(unchanged,"failed challenge admission leaves health, timers, rooms and pending state unchanged");
+         Check(remaining->eStatus==GLADIATOR&&remaining->pstBody->pstOpponent==NULL&&
+            pstFirstConn==remaining&&remaining->pstPrev==NULL&&remaining->pstNext==NULL,
+            "closing a rejected challenge participant safely clears reciprocal links");
+         Check(CharacterInspect("Attacker",&saved)==1&&saved.wins==0&&saved.losses==0&&
+            saved.kills==0&&saved.damage==2&&saved.speed==4&&saved.room==0,
+            "rejected challenge preserves the first saved character");
+         Check(CharacterInspect("Defender",&saved)==1&&saved.wins==0&&saved.losses==0&&
+            saved.kills==0&&saved.damage==3&&saved.speed==5&&saved.room==0,
+            "rejected challenge preserves the second saved character");
+         FinishHeapCombat();
+         Check(pstFirstConn==NULL,"challenge admission fixtures release all connection/body storage");
+      }
+}
+
+static void TestCombatRules(void)
+{
+   static const struct {
+      int roll,defender_dexterity,attacker_size,damage;
+      const char *message;
+   } cases[]={
+      {1,2,1,0,"You miss"}, {1,1,1,2,"You punch"},
+      {5,1,1,2,"You punch"}, {6,1,1,4,"You kick"},
+      {10,1,1,4,"You kick"}, {1,1,2,2,"You punch"}
+   };
+   size_t c;
+   int pulse,reverse;
+   for(c=0;c<sizeof(cases)/sizeof(cases[0]);c++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      first->pstBody->iStats[SIZ]=cases[c].attacker_size;
+      second->pstBody->iStats[DEX]=cases[c].defender_dexterity;
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      first->iOutLen=second->iOutLen=0;
+      fixed_d10=cases[c].roll;
+      combat_rolls=0;
+      first->pstBody->iSpeed=SPEED(first->pstBody)-1;
+      second->pstBody->iSpeed=-3;
+      Update();
+      Check(second->pstBody&&second->pstBody->iDam==cases[c].damage&&
+         combat_rolls==3&&OutputContains(first,cases[c].message),
+         "miss/punch/kick boundaries and odd half-damage rounding retain legacy rules");
+      Check(first->pstBody->iSpeed==-3&&first->pstBody->iWin==0&&
+         first->pstBody->iKill==0,"nonlethal attacks retain recovery and progression");
+      FinishHeapCombat();
+   }
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      fixed_d10=1;
+      combat_rolls=0;
+      for(pulse=0;pulse<8;pulse++)
+         Update();
+      Check(combat_rolls==0&&first->pstBody->iSpeed==8,
+         "speed-nine gladiators wait eight complete initial pulses");
+      Update();
+      Check(combat_rolls==6&&first->pstBody->iSpeed==-3&&
+         first->pstBody->iDam==2&&second->pstBody->iDam==2,
+         "both live opponents attack on the ninth pulse");
+      for(pulse=0;pulse<11;pulse++)
+         Update();
+      Check(combat_rolls==6,"three-pulse recovery is preserved before the next attack");
+      Update();
+      Check(combat_rolls==12&&first->pstBody->iDam==4&&second->pstBody->iDam==4,
+         "next attacks follow the original speed-plus-three interval");
+      FinishHeapCombat();
+   }
+   for(reverse=0;reverse<2;reverse++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      conn_t *attacker=reverse?second:first,*victim=reverse?first:second;
+      saved_character saved;
+      char victim_name[16];
+      strcpy(victim_name,victim->pstBody->a_chName);
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      Save(victim->pstBody);
+      fixed_d10=10;
+      victim->pstBody->iDam=HEALTH(victim->pstBody)-DAMAGE(attacker->pstBody);
+      attacker->pstBody->iSpeed=SPEED(attacker->pstBody)-1;
+      victim->pstBody->iSpeed=-3;
+      Update();
+      Check(victim->pstBody&&victim->pstBody->iDam==HEALTH(victim->pstBody)&&
+         victim->eStatus==FIGHTING&&attacker->pstBody->iKill==0&&access(victim_name,F_OK)==0,
+         "damage exactly equal to health remains alive under the original strict death threshold");
+      attacker->pstBody->iSpeed=SPEED(attacker->pstBody)-1;
+      Update();
+      Check(victim->pstBody==NULL&&victim->eStatus==CROWD&&
+         attacker->pstBody->iWin==1&&attacker->pstBody->iKill==1&&
+         attacker->pstBody->pstOpponent==NULL&&attacker->pstBody->iRoom==0&&
+         access(victim_name,F_OK)!=0&&errno==ENOENT,
+         "the next lethal hit frees only the defeated body and awards one persisted victory");
+      Check(CharacterInspect(attacker->pstBody->a_chName,&saved)==1&&saved.wins==1&&saved.kills==1,
+         "the victory counters are persisted in a valid historical-layout record");
+      FinishHeapCombat();
+   }
+}
+
+static void TestRevokedChallengeAdmission(void)
+{
+   account_session session;
+   const char *name="AdmissionPeer",*password="admission-fixture-password-only";
+   int accepting,reenabled;
+   Check(AccountRegister(name,password,&session),"admission account fixture registers");
+   for(accepting=1;accepting>=0;accepting--)
+      for(reenabled=0;reenabled<2;reenabled++)
+      {
+         conn_t *first=HeapCombatPair(),*second=first->pstNext;
+         conn_t *actor=accepting?second:first,*peer=accepting?first:second;
+         saved_character saved;
+         int unchanged;
+         Check(AccountLogin(name,password,&session),"admission peer obtains a current session");
+         peer->account=session;
+         first->pstBody->iDam=2;
+         second->pstBody->iDam=3;
+         Save(first->pstBody);
+         Save(second->pstBody);
+         if(accepting)
+            SetInput(first,"challenge Defender");
+         Check(AccountSetDisabled(name,1),"admission peer session is revoked before periodic polling");
+         if(reenabled)
+            Check(AccountSetDisabled(name,0),"re-enabling an account does not restore its old session");
+         Check(AccountSessionRole(peer->account)==ROLE_NONE&&!peer->bClosing&&!peer->bWriteFailed,
+            "revoked admission fixture has no pending-close flag yet");
+         SetInput(actor,accepting?"accept":"challenge Defender");
+         unchanged=first->pstBody->iDam==2&&second->pstBody->iDam==3&&
+            first->pstBody->iRoom==0&&second->pstBody->iRoom==0&&
+            first->eStatus==(accepting?CHALLENGER:GLADIATOR)&&second->eStatus==GLADIATOR&&
+            first->pstBody->pstOpponent==(accepting?second:NULL)&&
+            second->pstBody->pstOpponent==(accepting?first:NULL);
+         CloseConnection(peer);
+         Check(actor->pstBody->iWin==0&&actor->pstBody->iLoss==0&&actor->pstBody->iKill==0,
+            "revoked or stale challenger cannot manufacture a surrender win before polling");
+         Check(unchanged&&actor->eStatus==GLADIATOR&&actor->pstBody->pstOpponent==NULL,
+            "revoked admission changes no combat state and cleans pending links safely");
+         Check(CharacterInspect("Attacker",&saved)==1&&saved.wins==0&&saved.losses==0&&saved.damage==2,
+            "revoked admission preserves the first saved character");
+         Check(CharacterInspect("Defender",&saved)==1&&saved.wins==0&&saved.losses==0&&saved.damage==3,
+            "revoked admission preserves the second saved character");
+         FinishHeapCombat();
+         if(!reenabled)
+            Check(AccountSetDisabled(name,0),"admission account fixture re-enables for fresh login");
+      }
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      Check(AccountLogin(name,password,&session),"re-enabled admission peer can obtain a fresh epoch");
+      first->account=session;
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      Check(first->eStatus==FIGHTING&&second->eStatus==FIGHTING&&
+         first->pstBody->iRoom>0&&first->pstBody->iRoom==second->pstBody->iRoom,
+         "fresh reauthentication restores ordinary live duel admission");
+      FinishHeapCombat();
+   }
+}
+
+static void TestCombatRandomness(void)
+{
+   int first[64],second[64];
+   size_t i;
+   srand(12345);
+   for(i=0;i<64;i++)
+      first[i]=RollD10();
+   srand(12345);
+   for(i=0;i<64;i++)
+   {
+      second[i]=RollD10();
+      Check(first[i]>=1&&first[i]<=10&&second[i]>=1&&second[i]<=10,
+         "production combat dice remain in the inclusive D10 range");
+   }
+   Check(memcmp(first,second,sizeof(first))!=0,
+      "resetting the public libc seed cannot replay the production combat dice stream");
+}
+
+static void TestShutdownStorageCleanup(void)
+{
+   conn_t *first=HeapCombatPair(),*second=first->pstNext;
+   conn_t *anonymous=calloc(1,sizeof(*anonymous));
+   conn_t *connections[3]={first,second,anonymous};
+   const char *names[2]={"Attacker","Defender"};
+   body_t before[2],after;
+   int sockets[3][2],i;
+   Check(anonymous!=NULL,"shutdown anonymous connection allocation");
+   second->pstNext=anonymous;
+   anonymous->pstPrev=second;
+   anonymous->eStatus=CROWD;
+   for(i=0;i<3;i++)
+   {
+      Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets[i])==0,"shutdown fixture sockets");
+      Check(fcntl(sockets[i][0],F_SETFL,O_NONBLOCK)==0,"shutdown output stays nonblocking");
+      connections[i]->iSocket=sockets[i][0];
+      FD_SET(sockets[i][0],&a_sFd);
+   }
+   Save(first->pstBody);
+   Save(second->pstBody);
+   for(i=0;i<2;i++)
+   {
+      FILE *file=fopen(names[i],"rb");
+      Check(file&&fread(&before[i],sizeof(before[i]),1,file)==1,
+         "shutdown snapshot of pre-fight save");
+      fclose(file);
+   }
+   SetInput(first,"challenge Defender");
+   SetInput(second,"accept");
+   first->auth_stage=AUTH_NEW_PASSWORD;
+   strcpy(first->auth_password,"shutdown-fixture-password-only");
+   strcpy(first->auth_old_password,"shutdown-fixture-old-password-only");
+   anonymous->auth_stage=AUTH_LOGIN_PASSWORD;
+   strcpy(anonymous->a_chInBuf,"shutdown-partial-fixture");
+   anonymous->iInLen=(int)strlen(anonymous->a_chInBuf);
+   ReleaseConnections();
+   Check(pstFirstConn==NULL,"orderly shutdown releases the complete connection/body ownership list");
+   for(i=0;i<3;i++)
+   {
+      Check(fcntl(sockets[i][0],F_GETFD)==-1&&errno==EBADF&&
+         !FD_ISSET(sockets[i][0],&a_sFd),"shutdown closes and unregisters every client socket");
+      close(sockets[i][1]);
+   }
+   for(i=0;i<2;i++)
+   {
+      FILE *file=fopen(names[i],"rb");
+      Check(file&&fread(&after,sizeof(after),1,file)==1,"shutdown record remains readable");
+      fclose(file);
+      Check(memcmp(&after,&before[i],sizeof(after))==0,
+         "shutdown does not invent surrender counters or overwrite pre-fight saves");
+      unlink(names[i]);
+   }
+   ReleaseConnections();
+   Check(pstFirstConn==NULL,"shutdown storage cleanup is idempotent");
+}
+
+static void TestCombatHeartbeat(void)
+{
+   time_t before=AuthClock();
+   time_t combat=CombatClock();
+   time_t after=AuthClock();
+   Check(combat>=before&&combat<=after,
+      "combat heartbeat uses the monotonic domain rather than adjustable wall time");
+   Check(!CombatPulseDue(100,100)&&CombatPulseDue(100,101),
+      "combat heartbeat preserves one-second pulse gating");
+   Check(CombatPulseDue(100,1000)&&!CombatPulseDue(1000,1000),
+      "lag coalesces to one pulse instead of replaying missed turns");
+   Check(!CombatPulseDue(100,99)&&!CombatPulseDue(100,0),
+      "clock failure or an unexpected backwards sample cannot create an extra pulse");
+   if(sizeof(time_t)==sizeof(int64_t)&&(time_t)-1<(time_t)0)
+   {
+      Check(!CombatPulseDue((time_t)INT64_MAX,(time_t)INT64_MIN),
+         "signed time boundaries do not overflow the pulse comparison");
+      Check(CombatPulseDue((time_t)INT64_MIN,(time_t)INT64_MAX),
+         "large forward samples need no signed time subtraction");
+   }
 }
 
 static void TestCharacterCreation(void)
@@ -792,6 +1242,108 @@ static void TestCompletedAuthenticationDeadlines(void)
    pstFirstConn=NULL;
 }
 
+static void TestFailedOutputAuthorization(void)
+{
+   account_session owner;
+   conn_t connection;
+   staff_audit history[1];
+   char oversized[MAX_BUF];
+   int sockets[2],operation,transport,before,after;
+   int64_t audit_id;
+   Check(AccountRegister("Outputowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Outputowner",ROLE_OWNER),"output-proof owner fixture");
+   memset(oversized,'X',sizeof(oversized)-1);
+   oversized[sizeof(oversized)-1]='\0';
+   for(operation=4;operation>=1;operation--)
+      for(transport=0;transport<3;transport++)
+      {
+         Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0&&
+            fcntl(sockets[0],F_SETFL,O_NONBLOCK)==0,"output-proof socket fixture");
+         connection=stConnEmpty;
+         connection.iSocket=sockets[0];
+         connection.eStatus=CROWD;
+         connection.connection_token=40001;
+         connection.iIp=9000;
+         strcpy(connection.account_name,operation==4?"Outputowner":"Regtest");
+         if(operation>=3)
+            connection.account=operation==4?owner:regression_account;
+         if(operation==4)
+         {
+            Check(AccountSetRole("Regtest",ROLE_PLAYER),"output-proof target reset");
+            connection.staff_target=regression_account.id;
+            connection.staff_operation=1;
+            connection.staff_value=ROLE_BUILDER;
+         }
+         pstFirstConn=&connection;
+         memset(auth_jobs,0,sizeof(auth_jobs));
+         memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+         auth_global_attempts=0;
+         AccountQueue(&connection,operation,"regression-test-password-only");
+         Check(auth_jobs[0].state==1&&connection.auth_stage==AUTH_WAIT,
+            "output-proof request queues before transport failure");
+         before=AccountStaffAudit(owner,0,history,1);
+         Check(before>=0,"output-proof audit snapshot");
+         audit_id=before?history[0].id:0;
+         if(transport==1)
+            connection.bClosing=TRUE;
+         else if(transport==2)
+         {
+            while(write(sockets[0],oversized,sizeof(oversized)-1)>0)
+               ;
+            Check(errno==EAGAIN||errno==EWOULDBLOCK,"output-proof socket backpressure");
+            PutOutput(&connection,TO_USER,"%s",oversized);
+            Check(connection.bWriteFailed!=FALSE,"actual queue overflow marks output failure");
+         }
+         auth_jobs[0].state=3;
+         auth_jobs[0].ok=1;
+         auth_jobs[0].session=operation==4?owner:regression_account;
+         AccountPoll();
+         if(operation==4)
+            Check(AccountSessionRole(regression_account)==
+               (transport==0?ROLE_BUILDER:ROLE_PLAYER),
+               "closing or failed-output staff proof cannot mutate roles");
+         Check(connection.auth_stage==(transport==0?AUTH_IDLE:AUTH_WAIT)&&
+            (transport==0?connection.auth_request_token==0:
+               connection.auth_request_token!=0),
+            "completed proof applies only to a healthy transport");
+         if(operation<=2)
+            Check(connection.account.id==(transport==0?regression_account.id:0),
+               "failed-output registration/login result cannot grant a session");
+         if(operation==3&&transport!=0)
+            Check(!OutputContains(&connection,"Password changed"),
+               "failed-output password result is not consumed as a successful reply");
+         after=AccountStaffAudit(owner,0,history,1);
+         Check(after>=0&&((operation==4&&transport==0)?
+            (after>0&&history[0].id>audit_id):
+            ((after?history[0].id:0)==audit_id)),
+            "discarded proof leaves staff mutation history unchanged");
+         Check(auth_jobs[0].state==0&&auth_jobs[0].request_token==0,
+            "discarded completed job is wiped rather than replayable");
+         close(sockets[0]);
+         close(sockets[1]);
+      }
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"direct staff-boundary sockets");
+   for(transport=0;transport<3;transport++)
+   {
+      connection=stConnEmpty;
+      connection.iSocket=sockets[0];
+      connection.account=owner;
+      connection.bClosing=transport==1;
+      connection.bWriteFailed=transport==2;
+      pstFirstConn=&connection;
+      Check(AccountSetRole("Regtest",ROLE_PLAYER),"direct staff-boundary target reset");
+      StaffApply(&connection,regression_account.id,1,ROLE_BUILDER);
+      Check(AccountSessionRole(regression_account)==
+         (transport==0?ROLE_BUILDER:ROLE_PLAYER),
+         "staff mutation boundary independently rejects closing/failed transport");
+   }
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore output-proof gameplay role");
+   close(sockets[0]);
+   close(sockets[1]);
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
 static void TestProgressionCounterLimits(void)
 {
    int fight,i;
@@ -1091,11 +1643,129 @@ static void TestAllTrainingCommands(void)
    pstFirstConn=NULL;
 }
 
+static void TestDeathStorageFailure(void)
+{
+   conn_t *winner=HeapCombatPair(),*victim=winner->pstNext;
+   saved_character saved;
+   int i,fd;
+   strcpy(winner->pstBody->a_chName,"Deathwinner");
+   strcpy(victim->pstBody->a_chName,"Deathvictim");
+   for(i=STR;i<=WIT;i++)
+      winner->pstBody->iStats[i]=9;
+   victim->pstBody->iDam=HEALTH(victim->pstBody)-1;
+   Check(Save(winner->pstBody)&&Save(victim->pstBody),"death storage baseline records");
+   Check(rename("Deathvictim",".death-before")==0&&mkdir("Deathvictim",0700)==0,
+      "retain the original record while simulating an unsafe deletion target");
+   fd=open("Deathvictim/retained",O_CREAT|O_WRONLY|O_EXCL,0600);
+   Check(fd>=0&&close(fd)==0,"nonempty target cannot be removed by legacy remove");
+   winner->eStatus=victim->eStatus=FIGHTING;
+   winner->pstBody->pstOpponent=victim;
+   victim->pstBody->pstOpponent=winner;
+   winner->pstBody->iRoom=victim->pstBody->iRoom=1;
+   winner->pstBody->iSpeed=SPEED(winner->pstBody)-1;
+   fixed_d10=10;
+   Update();
+   Check(victim->pstBody!=NULL&&winner->pstBody->iWin==0&&
+      winner->pstBody->iKill==0,"failed death deletion cannot free victim or award a live victory");
+   Check(bStorageFailed&&bShutdown&&victim->pstBody->iDam==HEALTH(victim->pstBody)-1&&
+      !OutputContains(winner,"has killed"),"failed death halts before damage/kill-success state");
+   Update();
+   Check(winner->pstBody->iWin==0&&victim->pstBody!=NULL,
+      "halted combat cannot retry or invent a second outcome");
+   Check(unlink("Deathvictim/retained")==0&&rmdir("Deathvictim")==0&&
+      rename(".death-before","Deathvictim")==0,"unsafe test target and original record retained");
+   ReleaseConnections();
+   PlayerStorageClose();
+   Check(PlayerStorageOpen(),"startup completes the prepared death after target repair");
+   Check(CharacterInspect("Deathwinner",&saved)==1&&saved.wins==1&&saved.kills==1&&
+      access("Deathvictim",F_OK)!=0&&errno==ENOENT,"death recovery awards once and prevents resurrection");
+   PlayerStorageClose();
+   Check(PlayerStorageOpen()&&CharacterInspect("Deathwinner",&saved)==1&&
+      saved.wins==1&&saved.kills==1,"second restart does not duplicate death progression");
+   Check(unlink("Deathwinner")==0,"death-failure fixture record cleanup");
+   fixed_d10=0;
+   bStorageFailed=bShutdown=FALSE;
+}
+
+static void TestSurrenderStorageFailure(void)
+{
+   int departing_first;
+   for(departing_first=0;departing_first<=1;departing_first++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      conn_t *departing=departing_first?first:second,*remaining=departing_first?second:first;
+      saved_character saved;
+      char winner_name[16],loser_name[16];
+      strcpy(first->pstBody->a_chName,"Surrenderone");
+      strcpy(second->pstBody->a_chName,"Surrendertwo");
+      strcpy(winner_name,remaining->pstBody->a_chName);
+      strcpy(loser_name,departing->pstBody->a_chName);
+      Check(Save(first->pstBody)&&Save(second->pstBody),"surrender storage baseline records");
+      first->eStatus=second->eStatus=FIGHTING;
+      first->pstBody->pstOpponent=second;
+      second->pstBody->pstOpponent=first;
+      first->pstBody->iRoom=second->pstBody->iRoom=1;
+      StorageTestFault(ST_RECORD_RENAME,2,ENOSPC,0);
+      CloseConnection(departing);
+      Check(pstFirstConn==first&&first->pstNext==second&&second->pstPrev==first,
+         "failed surrender retains owned connections until orderly shutdown");
+      Check(bStorageFailed&&bShutdown&&remaining->pstBody->iWin==0&&
+         departing->pstBody->iLoss==0&&first->eStatus==FIGHTING&&
+         second->eStatus==FIGHTING,"failed second record does not commit a partial live surrender");
+      ReleaseConnections();
+      PlayerStorageClose();
+      Check(PlayerStorageOpen(),"restart finishes both surrender after-images");
+      Check(CharacterInspect(winner_name,&saved)==1&&saved.wins==1&&
+         saved.losses==0&&saved.kills==0,"recovered surrender winner is awarded exactly once");
+      Check(CharacterInspect(loser_name,&saved)==1&&saved.losses==1&&
+         saved.wins==0&&saved.kills==0,"recovered surrender loser is retained with one loss");
+      PlayerStorageClose();
+      Check(PlayerStorageOpen()&&CharacterInspect(loser_name,&saved)==1&&
+         saved.losses==1,"replaying a completed surrender cannot add another loss");
+      Check(unlink(winner_name)==0&&unlink(loser_name)==0,"surrender-failure fixture cleanup");
+      bStorageFailed=bShutdown=FALSE;
+   }
+}
+
+static void TestTrainingStorageFailure(void)
+{
+   ResetWorld();
+   strcpy(test_body_one.a_chName,"Failsave");
+   test_body_one.iStats[STR]=9;
+   test_body_one.iStats[DEX]=9;
+   test_body_one.iStats[STA]=9;
+   test_body_one.iStats[SIZ]=2;
+   test_body_one.iStats[WIT]=1;
+   test_body_one.iRoom=-1;
+   test_conn_one.eStatus=TRAINING;
+   Check(rmdir("Failsave")==0||errno==ENOENT,"no stale failed-save directory fixture");
+   Check(mkdir("Failsave",0700)==0,"failed-save target directory fixture");
+   SetInput(&test_conn_one,"leave");
+   Check(test_conn_one.eStatus==TRAINING&&test_body_one.iRoom==-1,
+      "failed training save cannot announce or commit a successful departure");
+   Check(bStorageFailed&&bShutdown&&!OutputContains(&test_conn_one,"You leave"),
+      "storage failure halts gameplay without a false training-success message");
+   SetInput(&test_conn_one,"str");
+   Check(test_body_one.iStats[STR]==9,"halted game ignores further input");
+   Check(rmdir("Failsave")==0,"failed-save target directory is retained");
+   PlayerStorageClose();
+   Check(PlayerStorageOpen(),"restart completes the pending training save");
+   {
+      saved_character snapshot;
+      Check(CharacterInspect("Failsave",&snapshot)==1&&snapshot.room==0&&
+         snapshot.stats[STR]==9,"recovered training result preserves assigned stats");
+   }
+   Check(unlink("Failsave")==0,"training-failure fixture record cleanup");
+   bStorageFailed=bShutdown=FALSE;
+   pstFirstConn=NULL;
+}
+
 int main(void)
 {
    signal(SIGPIPE,SIG_IGN);
    unlink("regression-accounts.sqlite3");
    Check(AccountsOpen("regression-accounts.sqlite3"),"regression account database opens");
+   Check(PlayerStorageOpen(),"regression player storage opens");
    Check(AccountRegister("Regtest","regression-test-password-only",&regression_account),
       "gameplay fixtures have an authenticated account");
    TestCharacterCreation();
@@ -1115,11 +1785,24 @@ int main(void)
    TestInGameStaff();
    TestAuthenticationReplay();
    TestCompletedAuthenticationDeadlines();
+   TestFailedOutputAuthorization();
    TestProgressionCounterLimits();
    TestTelnetInput();
+   TestTrustedProxyHeaders();
    TestExpiredAuthenticationInput();
    TestArenaAllocationLimits();
+   TestCombatPendingDisconnect();
+   TestChallengeDisconnectAdmission();
+   TestRevokedChallengeAdmission();
+   TestCombatRules();
+   TestCombatRandomness();
+   TestShutdownStorageCleanup();
+   TestCombatHeartbeat();
+   TestTrainingStorageFailure();
+   TestDeathStorageFailure();
+   TestSurrenderStorageFailure();
    AccountsClose();
+   PlayerStorageClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
    return EXIT_SUCCESS;

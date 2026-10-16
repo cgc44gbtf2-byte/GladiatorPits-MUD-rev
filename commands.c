@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /******************************************************************************
  Program     : The Gladiator Pits.
  Author      : Richard Woolcock (aka KaVir).
@@ -245,6 +246,14 @@ CMD(Who)
       iCount,iCount==1?"person":"people",iCrowd,iCrowd==1?"person":"people");
 }
 
+/* Revocation may precede the next poll's closing flag. Recheck current
+ * permissions as well as transport state before creating combat links. */
+static int ChallengeUnavailable(conn_t *first,conn_t *second)
+{
+   return CombatPendingDisconnect(first,second)||
+      !ConnectionCan(first,PERM_PLAY)||!ConnectionCan(second,PERM_PLAY);
+}
+
 CMD(Challenge)
 {
    conn_t*pstUser;
@@ -260,6 +269,8 @@ CMD(Challenge)
       PutOutput(pstConn,TO_USER,"They're no gladiator!\n\r");
    else if (ROOM(pstConn)||ROOM(pstUser))
       PutOutput(pstConn,TO_USER,"You must both be in the stadium.\n\r");
+   else if(ChallengeUnavailable(pstConn,pstUser))
+      PutOutput(pstConn,TO_USER,"That gladiator is unavailable; no challenge made.\n\r");
    else
    {
       /* Replacing either side must not leave a dangling old challenge. */
@@ -270,6 +281,10 @@ CMD(Challenge)
       PutOutput(pstConn,TO_USER,"You challenge %s to a fight.\n\r",szTxt);
       PutOutput(pstUser,TO_USER,"%s challenges you to a fight.\n\r",
          pstConn->pstBody->a_chName);
+
+      /* Message enqueue can discover a failed socket before admission. */
+      if(ChallengeUnavailable(pstConn,pstUser))
+         return;
 
       /* Indicate that you're now the challenger */
       pstConn->eStatus=CHALLENGER;
@@ -313,6 +328,8 @@ CMD(Accept)
    if (!(pstUser=pstConn->pstBody->pstOpponent)||!pstUser->pstBody||
        pstUser->pstBody->pstOpponent!=pstConn||pstUser->eStatus!=CHALLENGER)
       PutOutput(pstConn,TO_USER,"You've not been challenged.\n\r");
+   else if(ChallengeUnavailable(pstConn,pstUser))
+      PutOutput(pstConn,TO_USER,"That challenge is no longer available.\n\r");
    else
    {
       iArena=AvailableArena();
@@ -325,8 +342,14 @@ CMD(Accept)
       PutOutput(pstConn,TO_USER,"Ok.\n\r");
       PutOutput(pstUser,TO_USER,"%s accepts your challenge!\n\r",
          pstConn->pstBody->a_chName);
+      if(ChallengeUnavailable(pstConn,pstUser))
+         return;
       PutOutput(pstConn,TO_ALL,"[%s and %s have entered the arena]\n\r",
          pstConn->pstBody->a_chName,pstUser->pstBody->a_chName);
+
+      /* A full queue during the broadcast must not create a surrender win. */
+      if(ChallengeUnavailable(pstConn,pstUser))
+         return;
 
       /* Heal both gladiators */
       pstConn->pstBody->iDam=pstUser->pstBody->iDam=0;
@@ -374,6 +397,15 @@ CMD(Leave)
    for(i=STR;i<=WIT;i++)
       iCount+=pstConn->pstBody->iStats[i];
 
+   /* Persist the departure before announcing success or changing live state. */
+   if(iCount>=MAX_TRAIN)
+   {
+      body_t saved=*pstConn->pstBody;
+      saved.iRoom=0;
+      if(!Save(&saved))
+         return;
+   }
+
    /* Display the message to the user and others in the room */
    PutOutput(pstConn,TO_USER,"You leave the training room.\n\r");
    PutOutput(pstConn,TO_ROOM,"%s leaves the training room.\n\r", 
@@ -391,8 +423,6 @@ CMD(Leave)
    {
       pstConn->eStatus=GLADIATOR;
 
-      /* Gladiators can save! */
-      Save(pstConn->pstBody);
    }
    else/* Otherwise they're still a CITIZEN */
       pstConn->eStatus=CITIZEN;
