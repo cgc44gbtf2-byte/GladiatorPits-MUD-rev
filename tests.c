@@ -308,6 +308,64 @@ static void TestCombatRules(void)
    }
 }
 
+static void TestRevokedChallengeAdmission(void)
+{
+   account_session session;
+   const char *name="AdmissionPeer",*password="admission-fixture-password-only";
+   int accepting,reenabled;
+   Check(AccountRegister(name,password,&session),"admission account fixture registers");
+   for(accepting=1;accepting>=0;accepting--)
+      for(reenabled=0;reenabled<2;reenabled++)
+      {
+         conn_t *first=HeapCombatPair(),*second=first->pstNext;
+         conn_t *actor=accepting?second:first,*peer=accepting?first:second;
+         saved_character saved;
+         int unchanged;
+         Check(AccountLogin(name,password,&session),"admission peer obtains a current session");
+         peer->account=session;
+         first->pstBody->iDam=2;
+         second->pstBody->iDam=3;
+         Save(first->pstBody);
+         Save(second->pstBody);
+         if(accepting)
+            SetInput(first,"challenge Defender");
+         Check(AccountSetDisabled(name,1),"admission peer session is revoked before periodic polling");
+         if(reenabled)
+            Check(AccountSetDisabled(name,0),"re-enabling an account does not restore its old session");
+         Check(AccountSessionRole(peer->account)==ROLE_NONE&&!peer->bClosing&&!peer->bWriteFailed,
+            "revoked admission fixture has no pending-close flag yet");
+         SetInput(actor,accepting?"accept":"challenge Defender");
+         unchanged=first->pstBody->iDam==2&&second->pstBody->iDam==3&&
+            first->pstBody->iRoom==0&&second->pstBody->iRoom==0&&
+            first->eStatus==(accepting?CHALLENGER:GLADIATOR)&&second->eStatus==GLADIATOR&&
+            first->pstBody->pstOpponent==(accepting?second:NULL)&&
+            second->pstBody->pstOpponent==(accepting?first:NULL);
+         CloseConnection(peer);
+         Check(actor->pstBody->iWin==0&&actor->pstBody->iLoss==0&&actor->pstBody->iKill==0,
+            "revoked or stale challenger cannot manufacture a surrender win before polling");
+         Check(unchanged&&actor->eStatus==GLADIATOR&&actor->pstBody->pstOpponent==NULL,
+            "revoked admission changes no combat state and cleans pending links safely");
+         Check(CharacterInspect("Attacker",&saved)==1&&saved.wins==0&&saved.losses==0&&saved.damage==2,
+            "revoked admission preserves the first saved character");
+         Check(CharacterInspect("Defender",&saved)==1&&saved.wins==0&&saved.losses==0&&saved.damage==3,
+            "revoked admission preserves the second saved character");
+         FinishHeapCombat();
+         if(!reenabled)
+            Check(AccountSetDisabled(name,0),"admission account fixture re-enables for fresh login");
+      }
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      Check(AccountLogin(name,password,&session),"re-enabled admission peer can obtain a fresh epoch");
+      first->account=session;
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      Check(first->eStatus==FIGHTING&&second->eStatus==FIGHTING&&
+         first->pstBody->iRoom>0&&first->pstBody->iRoom==second->pstBody->iRoom,
+         "fresh reauthentication restores ordinary live duel admission");
+      FinishHeapCombat();
+   }
+}
+
 static void TestCombatRandomness(void)
 {
    int first[64],second[64];
@@ -1462,6 +1520,7 @@ int main(void)
    TestArenaAllocationLimits();
    TestCombatPendingDisconnect();
    TestChallengeDisconnectAdmission();
+   TestRevokedChallengeAdmission();
    TestCombatRules();
    TestCombatRandomness();
    TestShutdownStorageCleanup();

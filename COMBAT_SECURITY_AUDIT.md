@@ -142,3 +142,29 @@ GCC optimized passes 805 game/runtime + 120 account checks and both TCP suites.
 
 Next, reproduce the equivalent admission window for an account whose session
 has been revoked but has not yet been marked closing by periodic polling.
+
+The second regression failed with `revoked or stale challenger cannot
+manufacture a surrender win before polling`. A live body/status alone did not
+establish that the target still had a current account session. Admission now
+rechecks both participants' current `PERM_PLAY` permission, alongside transport
+state, before linking challenges and before committing acceptance.
+
+Four additional rejection scenarios cover challenge/accept against a disabled
+account and an account re-enabled with a stale epoch. They preserve records and
+produce no fabricated surrender counters. A positive case obtains a fresh
+session after re-enablement and verifies that an ordinary duel still starts.
+No roles, record layouts, formulas or active-duel settlement rules were changed.
+GCC optimized passes 858 game/runtime + 120 account checks and both TCP suites
+after this second increment.
+
+Final follow-up verification: all four local GCC/Clang optimized and ASan/UBSan
+entries pass **858 game/runtime + 120 account/security checks and both TCP
+suites**, with strict warnings and leak detection enabled and no sanitizer
+findings in the exercised paths. Both bounded analyzers complete without
+diagnostics on all four production translation units, using the limits recorded
+above. Historical CRLF and whitespace checks pass.
+
+Completed hosted-run/job logs will be verified and recorded in PR #6 against
+the new head; the earlier 665-check hosted run does not verify this follow-up.
+Filesystem/crash failure handling remains a separate, explicitly unverified
+limitation; this admission cleanup does not claim to fix it.
