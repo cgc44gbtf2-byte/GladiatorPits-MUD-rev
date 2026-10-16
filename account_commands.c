@@ -5,13 +5,16 @@
 
 typedef enum {
    AUTH_IDLE,AUTH_LOGIN_PASSWORD,AUTH_REGISTER_PASSWORD,AUTH_REGISTER_CONFIRM,
-   AUTH_OLD_PASSWORD,AUTH_NEW_PASSWORD,AUTH_NEW_CONFIRM,AUTH_WAIT
+   AUTH_OLD_PASSWORD,AUTH_NEW_PASSWORD,AUTH_NEW_CONFIRM,AUTH_WAIT,
+   AUTH_STAFF_CONFIRM,AUTH_STAFF_PASSWORD
 } auth_stage;
 
 typedef struct {
    int state,operation,ok;
    uint64_t token;
    account_session session;
+   int64_t staff_target;
+   int staff_operation,staff_value;
    char name[ACCOUNT_NAME_MAX+1];
    char password[ACCOUNT_PASSWORD_MAX+1],old_password[ACCOUNT_PASSWORD_MAX+1];
 } auth_job;
@@ -50,6 +53,8 @@ static void AccountCancel(conn_t *connection)
    sodium_memzero(connection->auth_old_password,sizeof(connection->auth_old_password));
    connection->auth_stage=AUTH_IDLE;
    connection->auth_deadline=0;
+   connection->staff_target=0;
+   connection->staff_operation=connection->staff_value=0;
    /* IAC WONT ECHO: restore client echo after a password prompt. */
    PutOutput(connection,TO_USER,"\xff\xfc\x01");
 }
@@ -117,8 +122,17 @@ static void *AuthWorker(void *unused)
          job.ok=AccountRegister(job.name,job.password,&job.session);
       else if(job.operation==2)
          job.ok=AccountLogin(job.name,job.password,&job.session);
-      else
+      else if(job.operation==3)
          job.ok=AccountPasswordChange(&job.session,job.old_password,job.password);
+      else if(job.operation==4)
+      {
+         account_session proof={0,0};
+         job.ok=AccountLogin(job.name,job.password,&proof)&&
+            proof.id==job.session.id&&proof.epoch==job.session.epoch;
+         sodium_memzero(&proof,sizeof(proof));
+      }
+      else
+         job.ok=0;
       sodium_memzero(job.password,sizeof(job.password));
       sodium_memzero(job.old_password,sizeof(job.old_password));
       job.state=3;
@@ -174,6 +188,9 @@ static void AccountQueue(conn_t *connection,int operation,const char *password)
       job->operation=operation;
       job->token=connection->connection_token;
       job->session=connection->account;
+      job->staff_target=connection->staff_target;
+      job->staff_operation=connection->staff_operation;
+      job->staff_value=connection->staff_value;
       strcpy(job->name,connection->account_name);
       strcpy(job->password,password);
       strcpy(job->old_password,connection->auth_old_password);
@@ -215,6 +232,21 @@ static int AccountPoll(void)
             break;
       if(connection&&connection->auth_stage==AUTH_WAIT&&!connection->bClosing)
       {
+         if(result.operation==4)
+         {
+            if(now>=connection->auth_deadline)
+            {
+               connection->bClosing=TRUE;
+               PutOutput(connection,TO_USER,"Staff action expired; no change applied.\n\r");
+            }
+            else if(result.ok&&AccountSessionRole(result.session)!=ROLE_NONE)
+               StaffApply(connection,result.staff_target,result.staff_operation,result.staff_value);
+            else
+               PutOutput(connection,TO_USER,"Staff password verification failed; no change applied.\n\r");
+            AccountCancel(connection);
+            sodium_memzero(&result,sizeof(result));
+            continue;
+         }
          AccountCancel(connection);
          if(result.ok&&AccountSessionRole(result.session)!=ROLE_NONE)
          {
@@ -249,6 +281,21 @@ static int AccountPoll(void)
 static void AccountInput(conn_t *connection,const char *input)
 {
    size_t length=strlen(input);
+   if(connection->auth_stage==AUTH_STAFF_CONFIRM)
+   {
+      if(strcmp(input,"CONFIRM")!=0)
+      {
+         AccountCancel(connection);
+         PutOutput(connection,TO_USER,"Staff action cancelled; no change applied.\n\r");
+      }
+      else
+      {
+         connection->auth_stage=AUTH_STAFF_PASSWORD;
+         connection->auth_deadline=AuthClock()+120;
+         PutOutput(connection,TO_USER,"\xff\xfb\x01" "Current staff password: ");
+      }
+      return;
+   }
    if(connection->auth_stage==AUTH_WAIT)
    {
       PutOutput(connection,TO_USER,"Please wait for authentication.\n\r");
@@ -263,6 +310,7 @@ static void AccountInput(conn_t *connection,const char *input)
    switch(connection->auth_stage)
    {
       case AUTH_LOGIN_PASSWORD: AccountQueue(connection,2,input); break;
+      case AUTH_STAFF_PASSWORD: AccountQueue(connection,4,input); break;
       case AUTH_REGISTER_PASSWORD:
       case AUTH_NEW_PASSWORD:
          memcpy(connection->auth_password,input,length+1);

@@ -42,6 +42,7 @@
 #include <pthread.h>
 #include <sodium.h>
 #include "accounts.h"
+#include "player_record.h"
 
 /******************************************************************************
  Required literals.
@@ -88,8 +89,6 @@ typedef enum {CROWD=1,CITIZEN=2,TRAINING=4,GLADIATOR=8,
 
 typedef struct connection conn_t;
 
-typedef struct body body_t;
-
 typedef struct
 {
    char       *szCommand;
@@ -130,20 +129,12 @@ char   *StatusName      (body_t*pstBody);
 conn_t *FindPerson      (char*szTxt);
 void    Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
-bool    ValidPlayerName (const char*szName);
-bool    ValidPlayer     (const body_t*pstBody,const char*szName);
 
 /******************************************************************************
  Required global variables.
  ******************************************************************************/
 
-static struct body
-{
-   char     a_chName[16];
-   int      iStats[5];
-   int      iSpeed,iRoom,iWin,iLoss,iKill,iDam;
-   conn_t  *pstOpponent;
-} stBodyEmpty;
+static body_t stBodyEmpty;
 
 static struct connection
 {
@@ -160,6 +151,8 @@ static struct connection
    char account_name[ACCOUNT_NAME_MAX+1];
    char auth_password[ACCOUNT_PASSWORD_MAX+1];
    char auth_old_password[ACCOUNT_PASSWORD_MAX+1];
+   int64_t staff_target;
+   int staff_operation,staff_value;
    conn_t  *pstPrev,*pstNext;
 } stConnEmpty;
 
@@ -174,8 +167,10 @@ extern const cmd_table_t kstCmdTable[];
  ******************************************************************************/
 
 /* Include the source code file for the commands */
+static void StaffApply(conn_t *connection,int64_t target,int operation,int value);
 #include "account_commands.c"
 #include "commands.c"
+#include "staff_commands.c"
 
 /* Create the command table */
 const cmd_table_t kstCmdTable[] =
@@ -187,6 +182,8 @@ const cmd_table_t kstCmdTable[] =
    {"login",     CmdLogin,     ALL,PERM_PUBLIC},
    {"account",   CmdAccount,   ALL,PERM_PUBLIC},
    {"password",  CmdPassword,  ALL,PERM_PLAY},
+   {"staff",     CmdStaff,     ALL,PERM_DASHBOARD},
+   {"dashboard", CmdStaff,     ALL,PERM_DASHBOARD},
    {"shutdown",  CmdShutdown,  ALL,PERM_SHUTDOWN},
    {"say",       CmdSay,       ALL,PERM_PUBLIC},
    {"chat",      CmdChat,      ALL&~CROWD,PERM_PLAY},
@@ -1176,31 +1173,3 @@ void Save(body_t*pstBody)
       remove(a_chTemporary);
    }
 }
-
-bool ValidPlayerName(const char*szName)
-{
-   size_t i;
-   size_t iLength=strlen(szName);
-
-   if(iLength<3||iLength>15)
-      return FALSE;
-   for(i=0;i<iLength;i++)
-      if(!isalpha((unsigned char)szName[i]))
-         return FALSE;
-   return TRUE;
-}
-
-bool ValidPlayer(const body_t*pstBody,const char*szName)
-{
-   int i;
-
-   if(!memchr(pstBody->a_chName,'\0',sizeof(pstBody->a_chName))||
-      strcmp(pstBody->a_chName,szName)!=0)
-      return FALSE;
-   for(i=STR;i<=WIT;i++)
-      if(pstBody->iStats[i]<1||pstBody->iStats[i]>9)
-         return FALSE;
-   return pstBody->iWin>=0&&pstBody->iLoss>=0&&pstBody->iKill>=0&&
-      pstBody->iDam>=0&&pstBody->iDam<=HEALTH(pstBody);
-}
-

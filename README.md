@@ -48,14 +48,45 @@ shared password. `GLAD_SHUTDOWN_PASSWORD` is no longer used. The historical
 `glad.txt` is unchanged; its passwordless loading and shutdown instructions are
 superseded by this README and [ACCOUNTS.md](ACCOUNTS.md).
 
+### Staff dashboard
+
+The dashboard is **inside the MUD**, using the same account and connection.
+After logging in with a staff account, type `staff` or `dashboard`. The menu is
+filtered by your current permissions; regular Players cannot see or use it.
+
+```text
+staff
+staff world
+staff accounts
+staff characters
+staff online
+staff inspect Character
+staff disable Account
+staff enable Account
+staff role Account moderator
+staff audit
+```
+
+Owners manage roles/staff access and audit history. Moderators/Administrators
+manage regular Player access and inspect characters. Builders see the overview
+and world inventory. Changes require `CONFIRM` and a separate current-password
+prompt—never put a password in a command. Character inspection is read-only;
+world/player editing is not implemented. There is no browser console, extra
+listening port, web dependency or web session system.
+
+Bootstrap Owner locally as described in [ACCOUNTS.md](ACCOUNTS.md); no default
+staff credentials exist. Read [DASHBOARD.md](DASHBOARD.md) before upgrading:
+account schema 1 → 2 is additive, but back up/stage data and upgrade the game and
+local admin tool together. Native player files are not migrated.
+
 ### Tests
 
-Runtime dependencies are libsodium, SQLite, and POSIX threads. The expanded TCP
-smoke test needs Python 3's standard library:
+Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
+in-game staff integration tests use Python 3's standard library:
 
 ```sh
-make check       # 133 game/runtime + 84 account checks and real TCP integration
-make sanitize    # repeat both suites with AddressSanitizer and UndefinedBehaviorSanitizer
+make check       # 175 game + 120 account checks, gameplay and in-game staff TCP suites
+make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```
 

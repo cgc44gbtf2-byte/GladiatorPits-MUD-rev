@@ -18,11 +18,11 @@
 - New accounts are always Player. There is no first-registrant administrator,
   remote role-grant command, default password, or client-supplied role.
 - Roles are Player, Builder, Moderator, Administrator, Owner. Permissions are
-  explicit, not comparisons of numeric rank: builders edit worlds, moderators
-  moderate players, administrators also edit players/shut down the server, and
-  owners additionally manage staff roles. Staff dashboard access is a capability,
-  not an implemented HTTP dashboard. Future handlers must enforce capabilities
-  server-side even when buttons/commands are hidden.
+  explicit, not comparisons of numeric rank. The in-game staff dashboard implements
+  account-access moderation and Owner-only role management; world/player editing
+  remain reserved capabilities, not implemented editors. Every handler must
+  enforce capabilities server-side even when buttons/commands are hidden.
+  See [DASHBOARD.md](DASHBOARD.md) for the separate dashboard increment.
 - Account IDs/character bindings are stored separately from raw player bodies.
   An unlinked existing save cannot be claimed over the network. An operator with
   filesystem access verifies ownership and explicitly links it. Death retains
@@ -82,10 +82,10 @@ before remote use. No public service was configured or deployed.
 | Administrator | Yes | Yes | Yes | Yes | Yes | Yes | No |
 | Owner | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 
-Only play and shutdown currently have gameplay command handlers. Dashboard,
-world/player editing, moderation and role-management capabilities are tested
-authorization primitives for future handlers, not claims that those features
-already exist. Command visibility and command execution both use the permission
+Existing gameplay commands retain their rules. The in-game `staff`/`dashboard`
+handlers implement staff views, Player access moderation and Owner role management.
+World/player editing remain authorization primitives for future handlers.
+Command visibility and command execution both use the permission
 metadata in the command table. Roles are reread from storage, not trusted from
 clients or cached indefinitely. An invalid role or unknown capability is denied.
 Anonymous spectator WHO/say/emote behavior is retained.
@@ -117,8 +117,9 @@ cannot bypass reservation by changing case or misreporting whether a file exists
 Role changes and local enable/disable operations are audited with the target
 account ID, operation/new role or access state, and timestamp. The last enabled
 Owner cannot be demoted or disabled. The local tool is a trusted filesystem
-operator boundary and may grant roles; future network role-management endpoints
-must require Owner permission. There is currently one role per account.
+operator boundary and may grant roles. The dashboard never exposes those trusted
+local functions: its separate network-facing account functions transactionally
+require actor permissions. There is currently one role per account.
 
 Password changes increment the account's session epoch. Other logged-in sessions
 are rejected, while the changing connection receives the new epoch. Disabling
@@ -178,9 +179,11 @@ Failures encountered and resolved:
   not trigger public re-claiming of legacy characters. No account reset or
   destructive migration is performed by startup.
 - There is no email verification, self-service password recovery, MFA,
-  character transfer, network role-management UI, web session/token API or staff
-  dashboard yet. Do not attach a future dashboard directly to internal local
-  administration functions without authenticating and checking capabilities.
+  character transfer or player/world editing. The new staff dashboard uses
+  authenticated, permission-checked functions rather than exposing internal local
+  administration functions. It uses the existing MUD account/connection session,
+  explicit confirmation and a separate current-password prompt. No web server,
+  browser dashboard, web session or bearer-token API is added.
 - Authentication is capped at eight outstanding jobs on one worker, five
   submissions/IP/minute and sixty globally/minute; login/registration/password
   change share those budgets. IP budgets use a bounded 64-entry table and reset

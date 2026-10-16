@@ -75,7 +75,7 @@ int AccountsOpen(const char *path)
    if(statement&&sqlite3_step(statement)==SQLITE_ROW)
       version=sqlite3_column_int(statement,0);
    sqlite3_finalize(statement);
-   if((version!=0&&version!=1)||!Execute("PRAGMA foreign_keys=ON")||
+   if((version<0||version>2)||!Execute("PRAGMA foreign_keys=ON")||
       !Execute("PRAGMA journal_mode=WAL")||!Execute("PRAGMA synchronous=FULL")||
       !Execute("BEGIN IMMEDIATE"))
       goto failed;
@@ -92,7 +92,12 @@ int AccountsOpen(const char *path)
       "CREATE TABLE IF NOT EXISTS audit("
       "id INTEGER PRIMARY KEY,event TEXT NOT NULL,account_id INTEGER NOT NULL,"
       "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
-      "PRAGMA user_version=1;")||!Execute("COMMIT"))
+      "CREATE INDEX IF NOT EXISTS characters_account_idx ON characters(account_id);"
+      "CREATE TABLE IF NOT EXISTS staff_audit("
+      "id INTEGER PRIMARY KEY,actor_id INTEGER NOT NULL,target_id INTEGER NOT NULL,"
+      "action TEXT NOT NULL,before_value TEXT NOT NULL,after_value TEXT NOT NULL,"
+      "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
+      "PRAGMA user_version=2;")||!Execute("COMMIT"))
       goto failed;
    if(crypto_pwhash_str_alg(dummy_hash,"dummy-not-a-login-password",26,
       crypto_pwhash_OPSLIMIT_INTERACTIVE,crypto_pwhash_MEMLIMIT_INTERACTIVE,
@@ -139,6 +144,8 @@ const char *AccountRoleName(account_role role)
 account_role AccountRoleParse(const char *name)
 {
    int role;
+   if(!name)
+      return ROLE_NONE;
    for(role=(int)ROLE_PLAYER;role<=(int)ROLE_OWNER;role++)
       if(strcmp(name,AccountRoleName((account_role)role))==0)
          return (account_role)role;
@@ -168,11 +175,10 @@ int AccountRoleCan(account_role role,account_permission permission)
    return (capabilities&(unsigned int)permission)==(unsigned int)permission;
 }
 
-account_role AccountSessionRole(account_session session)
+static account_role SessionRoleUnlocked(account_session session)
 {
    account_role role=ROLE_NONE;
    sqlite3_stmt *statement;
-   pthread_mutex_lock(&database_lock);
    statement=Prepare("SELECT role FROM accounts WHERE id=? AND epoch=? AND disabled=0");
    if(statement)
    {
@@ -182,6 +188,14 @@ account_role AccountSessionRole(account_session session)
          role=AccountRoleParse((const char*)sqlite3_column_text(statement,0));
    }
    sqlite3_finalize(statement);
+   return role;
+}
+
+account_role AccountSessionRole(account_session session)
+{
+   account_role role;
+   pthread_mutex_lock(&database_lock);
+   role=SessionRoleUnlocked(session);
    pthread_mutex_unlock(&database_lock);
    return role;
 }
@@ -512,4 +526,293 @@ int AccountLinkLegacy(const char *account,const char *character)
    }
    pthread_mutex_unlock(&database_lock);
    return ok;
+}
+
+static int CanReadPlayers(account_role role)
+{
+   return AccountRoleCan(role,PERM_PLAYER_MODERATE)||
+      AccountRoleCan(role,PERM_PLAYER_EDIT)||AccountRoleCan(role,PERM_ROLES_MANAGE);
+}
+
+static int FillAccount(sqlite3_stmt *statement,staff_account *output)
+{
+   const char *name=(const char*)sqlite3_column_text(statement,1);
+   const char *role=(const char*)sqlite3_column_text(statement,2);
+   if(!name||!role||!AccountNameValid(name)||AccountRoleParse(role)==ROLE_NONE)
+      return 0;
+   memset(output,0,sizeof(*output));
+   output->id=sqlite3_column_int64(statement,0);
+   strcpy(output->name,name);
+   output->role=AccountRoleParse(role);
+   output->disabled=sqlite3_column_int(statement,3);
+   output->characters=sqlite3_column_int64(statement,4);
+   return 1;
+}
+
+int AccountStaffSelf(account_session actor,staff_account *output)
+{
+   sqlite3_stmt *statement=NULL;
+   int ok=0;
+   pthread_mutex_lock(&database_lock);
+   statement=Prepare("SELECT id,name,role,disabled,"
+      "(SELECT count(*) FROM characters WHERE account_id=accounts.id) "
+      "FROM accounts WHERE id=? AND epoch=? AND disabled=0");
+   if(statement)
+   {
+      sqlite3_bind_int64(statement,1,actor.id);
+      sqlite3_bind_int64(statement,2,actor.epoch);
+      ok=sqlite3_step(statement)==SQLITE_ROW&&FillAccount(statement,output)&&
+         AccountRoleCan(output->role,PERM_DASHBOARD);
+   }
+   sqlite3_finalize(statement);
+   pthread_mutex_unlock(&database_lock);
+   return ok;
+}
+
+int AccountStaffList(account_session actor,int64_t after,staff_account *output,int limit)
+{
+   sqlite3_stmt *statement=NULL;
+   int count=-1,step;
+   if(limit<1||limit>50||after<0)
+      return -1;
+   pthread_mutex_lock(&database_lock);
+   if(CanReadPlayers(SessionRoleUnlocked(actor)))
+      statement=Prepare("SELECT id,name,role,disabled,"
+         "(SELECT count(*) FROM characters WHERE account_id=accounts.id) "
+         "FROM accounts WHERE id>? ORDER BY id LIMIT ?");
+   if(statement)
+   {
+      sqlite3_bind_int64(statement,1,after);
+      sqlite3_bind_int(statement,2,limit);
+      count=0;
+      while((step=sqlite3_step(statement))==SQLITE_ROW&&count<limit)
+      {
+         if(!FillAccount(statement,&output[count]))
+         {
+            count=-1;
+            break;
+         }
+         count++;
+      }
+      if(step!=SQLITE_DONE)
+         count=-1;
+   }
+   sqlite3_finalize(statement);
+   pthread_mutex_unlock(&database_lock);
+   return count;
+}
+
+static int ReadCharacters(account_session actor,const char *key,int exact,
+   staff_character *output,int limit)
+{
+   sqlite3_stmt *statement=NULL;
+   int count=-1,step;
+   if(limit<1||limit>50||strlen(key)>15)
+      return -1;
+   pthread_mutex_lock(&database_lock);
+   if(CanReadPlayers(SessionRoleUnlocked(actor)))
+      statement=Prepare(exact?
+         "SELECT c.name,a.id,a.name FROM characters c JOIN accounts a "
+         "ON a.id=c.account_id WHERE c.name=? COLLATE NOCASE LIMIT ?":
+         "SELECT c.name,a.id,a.name FROM characters c JOIN accounts a "
+         "ON a.id=c.account_id WHERE c.name>? COLLATE NOCASE "
+         "ORDER BY c.name COLLATE NOCASE LIMIT ?");
+   if(statement)
+   {
+      Text(statement,1,key);
+      sqlite3_bind_int(statement,2,limit);
+      count=0;
+      while((step=sqlite3_step(statement))==SQLITE_ROW&&count<limit)
+      {
+         const char *name=(const char*)sqlite3_column_text(statement,0);
+         const char *account=(const char*)sqlite3_column_text(statement,2);
+         if(!name||!account||!CharacterNameValid(name)||!AccountNameValid(account))
+         {
+            count=-1;
+            break;
+         }
+         memset(&output[count],0,sizeof(output[count]));
+         strcpy(output[count].name,name);
+         output[count].account_id=sqlite3_column_int64(statement,1);
+         strcpy(output[count].account_name,account);
+         count++;
+      }
+      if(step!=SQLITE_DONE)
+         count=-1;
+   }
+   sqlite3_finalize(statement);
+   pthread_mutex_unlock(&database_lock);
+   return count;
+}
+
+int AccountStaffCharacters(account_session actor,const char *after,
+   staff_character *output,int limit)
+{
+   return ReadCharacters(actor,after,0,output,limit);
+}
+
+int AccountStaffCharacter(account_session actor,const char *name,staff_character *output)
+{
+   return ReadCharacters(actor,name,1,output,1);
+}
+
+int AccountStaffAudit(account_session actor,int64_t before,staff_audit *output,int limit)
+{
+   sqlite3_stmt *statement=NULL;
+   int count=-1,step;
+   if(limit<1||limit>50||before<0)
+      return -1;
+   pthread_mutex_lock(&database_lock);
+   if(AccountRoleCan(SessionRoleUnlocked(actor),PERM_ROLES_MANAGE))
+      statement=Prepare(before?
+         "SELECT id,actor_id,target_id,action,before_value,after_value,"
+         "created_at FROM staff_audit WHERE id<? ORDER BY id DESC LIMIT ?":
+         "SELECT id,actor_id,target_id,action,before_value,after_value,"
+         "created_at FROM staff_audit ORDER BY id DESC LIMIT ?");
+   if(statement)
+   {
+      if(before)
+         sqlite3_bind_int64(statement,1,before);
+      sqlite3_bind_int(statement,before?2:1,limit);
+      count=0;
+      while((step=sqlite3_step(statement))==SQLITE_ROW&&count<limit)
+      {
+         staff_audit *row=&output[count++];
+         memset(row,0,sizeof(*row));
+         row->id=sqlite3_column_int64(statement,0);
+         row->actor_id=sqlite3_column_int64(statement,1);
+         row->target_id=sqlite3_column_int64(statement,2);
+         snprintf(row->action,sizeof(row->action),"%s",sqlite3_column_text(statement,3));
+         snprintf(row->before,sizeof(row->before),"%s",sqlite3_column_text(statement,4));
+         snprintf(row->after,sizeof(row->after),"%s",sqlite3_column_text(statement,5));
+         snprintf(row->created_at,sizeof(row->created_at),"%s",sqlite3_column_text(statement,6));
+      }
+      if(step!=SQLITE_DONE)
+         count=-1;
+   }
+   sqlite3_finalize(statement);
+   pthread_mutex_unlock(&database_lock);
+   return count;
+}
+
+static int StaffChange(account_session actor,int64_t target,account_role new_role,int disabled)
+{
+   sqlite3_stmt *statement=NULL;
+   account_role role,target_role=ROLE_NONE;
+   int ok=0,target_disabled=0;
+   char before[32],after[32];
+   if(target<=0||target==actor.id)
+      return 0;
+   pthread_mutex_lock(&database_lock);
+   if(!Execute("BEGIN IMMEDIATE"))
+      goto done;
+   role=SessionRoleUnlocked(actor);
+   statement=Prepare("SELECT role,disabled FROM accounts WHERE id=?");
+   if(statement)
+   {
+      sqlite3_bind_int64(statement,1,target);
+      if(sqlite3_step(statement)==SQLITE_ROW)
+      {
+         target_role=AccountRoleParse((const char*)sqlite3_column_text(statement,0));
+         target_disabled=sqlite3_column_int(statement,1);
+      }
+   }
+   sqlite3_finalize(statement);
+   statement=NULL;
+   if(target_role==ROLE_NONE||
+      (new_role!=ROLE_NONE&&new_role==target_role)||
+      (new_role==ROLE_NONE&&disabled==target_disabled)||
+      (new_role!=ROLE_NONE&&!AccountRoleCan(role,PERM_ROLES_MANAGE))||
+      (new_role==ROLE_NONE&&(!CanReadPlayers(role)||
+         (target_role!=ROLE_PLAYER&&!AccountRoleCan(role,PERM_ROLES_MANAGE)))))
+      goto rollback;
+   statement=Prepare(new_role!=ROLE_NONE?
+      "UPDATE accounts SET role=? WHERE id=? AND (role!='owner' OR ?='owner' "
+      "OR disabled=1 OR (SELECT count(*) FROM accounts WHERE role='owner' AND disabled=0)>1)":
+      "UPDATE accounts SET disabled=?,epoch=epoch+1 WHERE id=? AND "
+      "(role!='owner' OR ?=0 OR disabled=1 OR "
+      "(SELECT count(*) FROM accounts WHERE role='owner' AND disabled=0)>1)");
+   if(statement)
+   {
+      sqlite3_bind_int64(statement,2,target);
+      if(new_role!=ROLE_NONE)
+      {
+         Text(statement,1,AccountRoleName(new_role));
+         Text(statement,3,AccountRoleName(new_role));
+         snprintf(before,sizeof(before),"%s",AccountRoleName(target_role));
+         snprintf(after,sizeof(after),"%s",AccountRoleName(new_role));
+      }
+      else
+      {
+         sqlite3_bind_int(statement,1,disabled);
+         sqlite3_bind_int(statement,3,disabled);
+         snprintf(before,sizeof(before),"%s",target_disabled?"disabled":"enabled");
+         snprintf(after,sizeof(after),"%s",disabled?"disabled":"enabled");
+      }
+      ok=sqlite3_step(statement)==SQLITE_DONE&&sqlite3_changes(database)==1;
+   }
+   sqlite3_finalize(statement);
+   statement=NULL;
+   if(!ok)
+      goto rollback;
+   statement=Prepare("INSERT INTO staff_audit"
+      "(actor_id,target_id,action,before_value,after_value) VALUES(?,?,?,?,?)");
+   ok=0;
+   if(statement)
+   {
+      sqlite3_bind_int64(statement,1,actor.id);
+      sqlite3_bind_int64(statement,2,target);
+      Text(statement,3,new_role==ROLE_NONE?"access_changed":"role_changed");
+      Text(statement,4,before);
+      Text(statement,5,after);
+      ok=sqlite3_step(statement)==SQLITE_DONE&&
+         Audit(new_role==ROLE_NONE?"staff_access_changed":"staff_role_changed",target);
+   }
+   sqlite3_finalize(statement);
+   statement=NULL;
+   if(!ok||!Execute("COMMIT"))
+      goto rollback;
+   goto done;
+rollback:
+   sqlite3_finalize(statement);
+   Execute("ROLLBACK");
+   ok=0;
+done:
+   pthread_mutex_unlock(&database_lock);
+   return ok;
+}
+
+int AccountStaffRole(account_session actor,int64_t target,account_role role)
+{
+   return role>=ROLE_PLAYER&&role<=ROLE_OWNER&&StaffChange(actor,target,role,0);
+}
+
+int AccountStaffAccess(account_session actor,int64_t target,int disabled)
+{
+   return (disabled==0||disabled==1)&&StaffChange(actor,target,ROLE_NONE,disabled);
+}
+
+int AccountStaffFind(account_session actor,const char *name,staff_account *output)
+{
+   sqlite3_stmt *statement=NULL;
+   int count=-1,step;
+   if(!AccountNameValid(name))
+      return -1;
+   pthread_mutex_lock(&database_lock);
+   if(CanReadPlayers(SessionRoleUnlocked(actor)))
+      statement=Prepare("SELECT id,name,role,disabled,"
+         "(SELECT count(*) FROM characters WHERE account_id=accounts.id) "
+         "FROM accounts WHERE name=?");
+   if(statement)
+   {
+      Text(statement,1,name);
+      step=sqlite3_step(statement);
+      if(step==SQLITE_DONE)
+         count=0;
+      else if(step==SQLITE_ROW&&FillAccount(statement,output))
+         count=1;
+   }
+   sqlite3_finalize(statement);
+   pthread_mutex_unlock(&database_lock);
+   return count;
 }

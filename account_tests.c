@@ -35,6 +35,87 @@ static int Scalar(const char *sql)
    return value;
 }
 
+static void StaffTests(account_session builder,account_session owner)
+{
+   account_session player,moderator;
+   staff_account rows[50],self;
+   staff_character characters[50];
+   staff_audit history[50];
+   sqlite3 *fixture=NULL;
+   AccountsClose();
+   Check(sqlite3_open("test-accounts.sqlite3",&fixture)==SQLITE_OK,
+      "version-one migration fixture opens");
+   Check(sqlite3_exec(fixture,"DROP TABLE staff_audit; PRAGMA user_version=1;",
+      NULL,NULL,NULL)==SQLITE_OK,"simulate old schema without changing account records");
+   sqlite3_close(fixture);
+   Check(AccountsOpen("test-accounts.sqlite3")&&Scalar("PRAGMA user_version")==2,
+      "version-one database upgrades additively");
+   Check(AccountSessionRole(builder)==ROLE_BUILDER&&
+      AccountCharacter(builder,"Newhero",0),"upgrade preserves roles/epochs/ownership");
+   Check(AccountRegister("Stafftarget",test_password,&player),"staff target fixture");
+   Check(AccountRegister("Modstaff",test_password,&moderator)&&
+      AccountSetRole("Modstaff",ROLE_MODERATOR),"moderator fixture");
+   Check(AccountStaffSelf(builder,&self)&&self.id==builder.id,
+      "builder can inspect own staff session");
+   Check(!AccountStaffSelf(player,&self),"player cannot enter staff dashboard");
+   Check(AccountStaffList(player,0,rows,50)==-1&&
+      AccountStaffList(builder,0,rows,50)==-1,"player/builder cannot list private accounts");
+   Check(AccountStaffList(moderator,0,rows,50)>=4,"moderator account listing");
+   Check(AccountStaffFind(moderator,"stafftarget",&self)==1&&self.id==player.id,
+      "staff target lookup uses exact case-insensitive bound name");
+   Check(AccountStaffFind(builder,"Stafftarget",&self)==-1&&
+      AccountStaffFind(player,"Stafftarget",&self)==-1,"unprivileged staff target lookup denied");
+   Check(AccountStaffFind(owner,"Unknownfixture",&self)==0&&
+      AccountStaffFind(owner,"../accounts",&self)==-1,"staff lookup missing/invalid names fail safely");
+   Check(AccountStaffList(owner,0,rows,0)==-1&&
+      AccountStaffList(owner,-1,rows,1)==-1&&AccountStaffList(owner,0,rows,51)==-1,
+      "staff list bounds enforced");
+   Check(AccountCharacter(player,"Staffhero",0),"character inspection ownership fixture");
+   Check(AccountStaffCharacters(moderator,"",characters,50)>=3,
+      "moderator can list character metadata");
+   Check(AccountStaffCharacter(moderator,"staffhero",characters)==1&&
+      characters[0].account_id==player.id,"character lookup is permission checked");
+   Check(AccountStaffCharacters(builder,"",characters,50)==-1,
+      "builder cannot inspect private character metadata");
+   Check(AccountStaffRole(moderator,player.id,ROLE_OWNER)==0,
+      "moderator cannot grant roles by calling backend directly");
+   Check(AccountStaffAccess(moderator,owner.id,1)==0,"moderator cannot disable staff");
+   Check(!AccountStaffAccess(moderator,player.id,0)&&
+      AccountSessionRole(player)==ROLE_PLAYER,"no-op access change does not revoke sessions");
+   Check(AccountStaffAccess(moderator,player.id,1)&&
+      AccountSessionRole(player)==ROLE_NONE,"moderator can disable regular player");
+   Check(AccountStaffAccess(moderator,player.id,0),"moderator can enable regular player");
+   Check(AccountSetRole("Alice",ROLE_ADMINISTRATOR),"administrator fixture");
+   Check(!AccountStaffRole(builder,player.id,ROLE_OWNER)&&
+      !AccountStaffAccess(builder,moderator.id,1),"administrator cannot grant roles/disable staff");
+   Check(AccountStaffRole(owner,builder.id,ROLE_OWNER),"owner can grant staff role");
+   Check(!AccountStaffRole(owner,owner.id,ROLE_PLAYER)&&
+      !AccountStaffAccess(owner,owner.id,1),"remote self-modification forbidden");
+   Check(AccountStaffRole(owner,builder.id,ROLE_BUILDER),"owner can revoke role");
+   Check(!AccountStaffRole(builder,player.id,ROLE_OWNER),
+      "revoked owner loses mutation authority immediately");
+   Check(AccountStaffAudit(moderator,0,history,50)==-1,
+      "staff role/access audit limited to owner");
+   Check(AccountStaffAudit(owner,0,history,50)==4&&
+      history[0].actor_id==owner.id&&history[0].target_id==builder.id&&
+      strcmp(history[0].before,"owner")==0&&strcmp(history[0].after,"builder")==0,
+      "successful staff writes record actor, target and before/after atomically");
+   Check(sqlite3_open("test-accounts.sqlite3",&fixture)==SQLITE_OK&&
+      sqlite3_exec(fixture,"CREATE TRIGGER deny_staff_log BEFORE INSERT ON staff_audit "
+         "BEGIN SELECT RAISE(ABORT,'fixture'); END;",NULL,NULL,NULL)==SQLITE_OK,
+      "staff audit-failure fixture");
+   Check(!AccountStaffRole(owner,player.id,ROLE_BUILDER)&&
+      Scalar("SELECT role='player' FROM accounts WHERE name='Stafftarget'")==1&&
+      Scalar("SELECT count(*) FROM staff_audit")==4,
+      "audit insertion failure rolls back role mutation and history");
+   Check(sqlite3_exec(fixture,"DROP TRIGGER deny_staff_log;",NULL,NULL,NULL)==SQLITE_OK,
+      "staff audit-failure fixture cleanup");
+   sqlite3_close(fixture);
+   Check(AccountSetRole("Bob",ROLE_BUILDER)==0,"last active owner still protected locally");
+   Check(AccountSetDisabled("Modstaff",1)&&
+      AccountStaffList(moderator,0,rows,50)==-1,"disabled staff session cannot read data");
+}
+
 int main(void)
 {
    account_session alice,bob,login,old;
@@ -117,6 +198,7 @@ int main(void)
       "password, role and character ownership persist");
    Check(Scalar("SELECT count(*) FROM audit WHERE event='password_changed'")==1,
       "security changes have audit records");
+   StaffTests(login,bob);
    AccountsClose();
    Check(chmod("test-accounts.sqlite3",0644)==0,"insecure-mode fixture");
    Check(!AccountsOpen("test-accounts.sqlite3"),"publicly readable database rejected");

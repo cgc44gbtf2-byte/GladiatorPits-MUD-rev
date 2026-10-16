@@ -5,6 +5,7 @@
 #define main glad_server_main
 #include "glad.c"
 #undef main
+#include <stddef.h>
 
 static conn_t test_conn_one;
 static conn_t test_conn_two;
@@ -413,6 +414,136 @@ static void TestAuthenticationLimits(void)
    pstFirstConn=NULL;
 }
 
+static void TestSavedInspection(void)
+{
+   struct historical_body {
+      char name[16];
+      int stats[5];
+      int speed,room,wins,losses,kills,damage;
+      conn_t *opponent;
+   };
+   saved_character snapshot;
+   body_t before,after;
+   FILE *file;
+   Check(sizeof(body_t)==sizeof(struct historical_body)&&
+      offsetof(body_t,iStats)==offsetof(struct historical_body,stats)&&
+      offsetof(body_t,iSpeed)==offsetof(struct historical_body,speed)&&
+      offsetof(body_t,iRoom)==offsetof(struct historical_body,room)&&
+      offsetof(body_t,iWin)==offsetof(struct historical_body,wins)&&
+      offsetof(body_t,iLoss)==offsetof(struct historical_body,losses)&&
+      offsetof(body_t,iKill)==offsetof(struct historical_body,kills)&&
+      offsetof(body_t,iDam)==offsetof(struct historical_body,damage)&&
+      offsetof(body_t,pstOpponent)==offsetof(struct historical_body,opponent),
+      "shared record header exactly preserves historical native ABI");
+   ResetWorld();
+   strcpy(test_body_one.a_chName,"Inspecthero");
+   test_body_one.iStats[0]=4;
+   test_body_one.iStats[1]=5;
+   test_body_one.iStats[2]=6;
+   test_body_one.iStats[3]=7;
+   test_body_one.iStats[4]=8;
+   test_body_one.iWin=42;
+   Save(&test_body_one);
+   file=fopen("Inspecthero","rb");
+   Check(file!=NULL&&fread(&before,sizeof(before),1,file)==1,"snapshot fixture read");
+   fclose(file);
+   Check(CharacterInspect("Inspecthero",&snapshot)==1&&snapshot.wins==42&&
+      snapshot.stats[4]==8,"native saved character inspection");
+   file=fopen("Inspecthero","rb");
+   Check(file!=NULL&&fread(&after,sizeof(after),1,file)==1&&
+      memcmp(&before,&after,sizeof(before))==0,"inspection does not modify save bytes");
+   fclose(file);
+   Check(CharacterInspect("../Inspecthero",&snapshot)==-1&&
+      CharacterInspect("Missinghero",&snapshot)==0,"unsafe/missing inspection paths");
+   Check(symlink("Inspecthero","Inspectlink")==0,"inspection symlink fixture");
+   Check(CharacterInspect("Inspectlink",&snapshot)==-1,"inspection refuses symlinks");
+   unlink("Inspectlink");
+   unlink("Inspecthero");
+   pstFirstConn=NULL;
+}
+
+static void TestInGameStaff(void)
+{
+   account_session owner;
+   int sockets[2];
+   ResetWorld();
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"dashboard");
+   Check(OutputContains(&test_conn_one,"Permission denied"),"players denied in-game dashboard");
+   Check(AccountSetRole("Regtest",ROLE_BUILDER),"builder dashboard fixture");
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"staff");
+   Check(OutputContains(&test_conn_one,"STAFF DASHBOARD")&&
+      !OutputContains(&test_conn_one,"staff accounts"),"builder sees capability-filtered menu");
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"staff accounts");
+   Check(OutputContains(&test_conn_one,"Permission denied"),"builder cannot bypass menu");
+   Check(AccountRegister("Staffowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Staffowner",ROLE_OWNER),"owner dashboard fixture");
+   test_conn_one.account=owner;
+   strcpy(test_conn_one.account_name,"Staffowner");
+   test_conn_one.connection_token=10001;
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"staff confirmation socket fixture");
+   test_conn_one.iSocket=sockets[0];
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"staff target fixture");
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"staff role Regtest builder extra");
+   Check(test_conn_one.auth_stage==AUTH_IDLE,"staff arguments cannot contain passwords");
+   SetInput(&test_conn_one,"staff role Regtest builder");
+   Check(test_conn_one.auth_stage==AUTH_STAFF_CONFIRM,"role change requires explicit confirmation");
+   SetInput(&test_conn_one,"cancel");
+   Check(test_conn_one.auth_stage==AUTH_IDLE&&AccountSessionRole(regression_account)==ROLE_PLAYER,
+      "cancelled role change leaves account untouched");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   SetInput(&test_conn_one,"staff role Regtest builder");
+   SetInput(&test_conn_one,"CONFIRM");
+   Check(test_conn_one.auth_stage==AUTH_STAFF_PASSWORD,"confirmation opens separate password prompt");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   Check(auth_jobs[0].state==1&&auth_jobs[0].operation==4&&
+      AccountSessionRole(regression_account)==ROLE_PLAYER,
+      "password proof queues without applying staff mutation");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_BUILDER&&
+      test_conn_one.auth_stage==AUTH_IDLE,"verified result applies on game thread");
+   SetInput(&test_conn_one,"staff role Regtest moderator");
+   SetInput(&test_conn_one,"CONFIRM");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   test_conn_one.auth_deadline=AuthClock()-1;
+   AccountPoll();
+   Check(test_conn_one.bClosing&&AccountSessionRole(regression_account)==ROLE_BUILDER,
+      "expired completed proof cannot apply role mutation");
+   test_conn_one.bClosing=FALSE;
+   SetInput(&test_conn_one,"staff role Regtest moderator");
+   SetInput(&test_conn_one,"CONFIRM");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   auth_jobs[0].token++;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_BUILDER,
+      "stale connection token cannot apply queued staff action");
+   AccountCancel(&test_conn_one);
+   SetInput(&test_conn_one,"staff role Regtest moderator");
+   SetInput(&test_conn_one,"CONFIRM");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   close(sockets[1]);
+   AccountPoll();
+   Check(test_conn_one.bClosing&&AccountSessionRole(regression_account)==ROLE_BUILDER,
+      "known-disconnected socket cannot apply completed proof");
+   close(sockets[0]);
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore gameplay fixture role");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -532,6 +663,8 @@ int main(void)
    TestAllTrainingCommands();
    TestAccountCommandGates();
    TestAuthenticationLimits();
+   TestSavedInspection();
+   TestInGameStaff();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
