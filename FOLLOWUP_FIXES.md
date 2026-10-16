@@ -38,6 +38,36 @@ fields. No live data is accessed or migrated. No new deployment is initiated.
   and both TCP suites after increment 1. Coverage exercises every pending stage,
   inclusive expiry, partial/batched/oversized wire input, no queued late work,
   and credential/metadata clearing. Existing live-deadline flows remain covered.
+- Increment 2: moved the private arena cursor to file scope solely to exercise
+  its boundary through the real `accept` command. The otherwise unchanged
+  increment first triggered UBSan signed overflow at `INT_MAX`.
+- Arena allocation now advances without signed overflow, wraps to positive
+  IDs, skips every occupied room, and has a descriptor-bounded search. A failed
+  search rejects acceptance before changing health, speed, room or challenge
+  state. The cursor is transient; no player-record field or layout changes.
+- GCC ASan/UBSan with recovery disabled passed 458 game/runtime + 120 account
+  checks and both TCP suites. New tests cover the upper boundary, wrapping,
+  multiple occupied arenas and unchanged existing fights. A synthetic world
+  exceeding normal descriptor admission exercises defensive search exhaustion;
+  that fixture does not imply normal games have a 1,024-arena limit.
+
+## Final verification
+
+- GCC 15.3.0 and Clang 20.1.8 optimized production builds and ASan/UBSan builds
+  all pass **458 game/runtime + 120 account/security checks and both real-TCP
+  suites**, with strict warnings and `-Werror`. Sanitizers enable leak detection
+  and halt on undefined behavior. No sanitizer findings occurred in exercised
+  paths. The existing historical native ABI and persisted-data checks still pass.
+- GCC's analyzer and Clang's bounded analyzer complete without diagnostics on
+  all four native translation units, including the command/Telnet sources
+  included by `glad.c`. Runs are sequential with 35-second per-unit time limits
+  and virtual-memory caps; Clang is limited to 5,000 exploded nodes per
+  top-level analysis. These bounds restrict path coverage.
+- Historical CRLF conventions and incremental whitespace checks pass. No new
+  runtime dependency, schema migration, credential reset, ownership transfer,
+  player-data mutation or gameplay-system removal is part of this follow-up.
+- These checks ran in the development environment, not a newly configured
+  GitHub CI workflow. Future automatic CI remains separate work.
 
 ## Remaining limits
 

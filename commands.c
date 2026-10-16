@@ -281,10 +281,31 @@ CMD(Challenge)
    }
 }
 
+/* Private transient cursor, not part of a saved player record. */
+static int arena_sequence;
+
+static int AvailableArena(void)
+{
+   int attempt;
+   /* Active connections are descriptor-bounded. Within that many candidates
+    * a valid world must have a free ID; keep an explicit defensive work bound. */
+   for(attempt=0;attempt<FD_SETSIZE;attempt++)
+   {
+      conn_t *user;
+      arena_sequence=arena_sequence<0||arena_sequence==INT_MAX?1:arena_sequence+1;
+      for(user=pstFirstConn;user;user=user->pstNext)
+         if(ROOM(user)==arena_sequence)
+            break;
+      if(!user)
+         return arena_sequence;
+   }
+   return 0;
+}
+
 CMD(Accept)
 {
    conn_t*pstUser;
-   static int s_iArena;
+   int iArena;
    (void)szTxt;
 
    NEED_BODY; /* Logs an error and returns, if pstConn has no body */
@@ -294,6 +315,12 @@ CMD(Accept)
       PutOutput(pstConn,TO_USER,"You've not been challenged.\n\r");
    else
    {
+      iArena=AvailableArena();
+      if(!iArena)
+      {
+         PutOutput(pstConn,TO_USER,"All arenas are busy; try again later.\n\r");
+         return;
+      }
       /* Send the acceptance message */
       PutOutput(pstConn,TO_USER,"Ok.\n\r");
       PutOutput(pstUser,TO_USER,"%s accepts your challenge!\n\r",
@@ -308,7 +335,7 @@ CMD(Accept)
       pstConn->pstBody->iSpeed=pstUser->pstBody->iSpeed=0;
 
       /* Move both gladiators into an arena */
-      pstConn->pstBody->iRoom=pstUser->pstBody->iRoom=++s_iArena;
+      pstConn->pstBody->iRoom=pstUser->pstBody->iRoom=iArena;
 
       /* Set both gladiators to fighting */
       pstConn->eStatus=pstUser->eStatus=FIGHTING;

@@ -86,6 +86,9 @@ local admin tool together. Native player files are not migrated.
 
 See [SECURITY_FIXES.md](SECURITY_FIXES.md) for the subsequent request-cancellation,
 deadline, progression-overflow and Telnet fixes, their tests and remaining limits.
+The post-merge [follow-up log](FOLLOWUP_FIXES.md) records input-time expiry and
+bounded, collision-checked arena-ID allocation. Ordinary combat rules and native
+save fields are unchanged.
 Native win/loss/kill counters retain their existing `int` layout; at `INT_MAX`
 they retain that value and log the ceiling instead of wrapping negative.
 
@@ -95,7 +98,7 @@ Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
 in-game staff integration tests use Python 3's standard library:
 
 ```sh
-make check       # 342 game + 120 account checks, gameplay and in-game staff TCP suites
+make check       # 458 game + 120 account checks, gameplay and in-game staff TCP suites
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```
