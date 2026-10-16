@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Player validation derived from The Gladiator Pits, Copyright (C) 2000
  * Richard Woolcock. May be used/distributed freely if this notice is retained. */
 #define _POSIX_C_SOURCE 200809L

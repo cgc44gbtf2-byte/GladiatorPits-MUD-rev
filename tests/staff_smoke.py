@@ -1,3 +1,4 @@
+# Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
 """Exercise the actual in-game dashboard, using disposable TCP accounts only."""
 
 import os
@@ -12,10 +13,12 @@ from smoke import Client, PASSWORD, train, wait_for_port
 def main():
     binary, admin = (str(Path(value).resolve()) for value in sys.argv[1:3])
     clients, process = [], None
+    environment = dict(os.environ, GLAD_BIND_ADDRESS="127.0.0.1")
+    environment.pop("GLAD_TRUSTED_PROXY", None)
     with tempfile.TemporaryDirectory(prefix="glad-staff-") as directory:
         def start():
             Path(directory, "log.txt").unlink(missing_ok=True)
-            child = subprocess.Popen([binary], cwd=directory, env=dict(os.environ),
+            child = subprocess.Popen([binary], cwd=directory, env=environment,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return child, wait_for_port(child, directory)
 

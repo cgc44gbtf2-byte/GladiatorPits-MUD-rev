@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /******************************************************************************
  Program     : The Gladiator Pits.
  Author      : Richard Woolcock (aka KaVir).
@@ -140,6 +141,7 @@ static void StorageFailure(const char *operation);
 static time_t CombatClock(void);
 static int CombatPulseDue(time_t last,time_t now);
 static int CombatPendingDisconnect(const conn_t *first,const conn_t *second);
+static int ProxyExpired(const conn_t *connection);
 
 /******************************************************************************
  Required global variables.
@@ -155,6 +157,11 @@ static struct connection
    int      iSocket,iInLen,iOutLen;
    uint32_t iIp;
    bool     bWriteFailed,bClosing,bInputTooLong;
+   bool proxy_pending,proxy_ipv6;
+   unsigned char proxy_address[16];
+   char proxy_header[108];
+   size_t proxy_length;
+   time_t proxy_deadline;
    account_session account;
    uint64_t connection_token,auth_request_token;
    int telnet_state;
@@ -186,6 +193,7 @@ static void StaffApply(conn_t *connection,int64_t target,int operation,int value
 #include "commands.c"
 #include "staff_commands.c"
 #include "telnet.c"
+#include "proxy.c"
 
 /* Create the command table */
 const cmd_table_t kstCmdTable[] =
@@ -241,6 +249,12 @@ int main(void)
 
    /* A disconnected client must not terminate the whole server on write. */
    signal(SIGPIPE,SIG_IGN);
+
+   if(!ProxyConfigure())
+   {
+      fprintf(stderr,"Invalid GLAD_TRUSTED_PROXY: require one trusted IPv4 transport address.\n");
+      return EXIT_FAILURE;
+   }
 
    /* Account startup initializes libsodium, including secure combat dice. */
    umask(0077);
@@ -407,6 +421,15 @@ bool GetInput(conn_t*pstConn)
    /* Process every complete line; TCP may deliver several in one read. */
    for(i=0;i<(int)iInput;i++)
    {
+      if(pstConn->proxy_pending)
+      {
+         if(!ProxyData(pstConn,(unsigned char)a_chBuf[i]))
+         {
+            sodium_memzero(a_chBuf,sizeof(a_chBuf));
+            return FALSE;
+         }
+         continue;
+      }
       if(!TelnetData(pstConn,(unsigned char)a_chBuf[i]))
          continue;
       if(a_chBuf[i]=='\n')
@@ -467,6 +490,8 @@ void ParseInput(conn_t*pstConn)
    char *szTxt=pstConn->a_chInBuf;
    int  i;
    if(bStorageFailed)
+      return;
+   if(pstConn->proxy_pending)
       return;
    if(pstConn->auth_stage!=AUTH_IDLE)
    {
@@ -574,6 +599,8 @@ void PutOutput(conn_t*pstConn,out_t peOut,char*szTxt,...)
 
       if(pstUser->bWriteFailed)
          continue;
+      if(pstUser->proxy_pending)
+         continue; /* Never disclose output before trusted header admission. */
       bRePrompt=FALSE;
 
       /* Determine if their prompt needs to be redrawn first */
@@ -689,6 +716,12 @@ bool NewConnection(int iSocket)
       Log("Cannot identify new connection: %s\n",strerror(errno));
       return FALSE;
    }
+   if(proxy_enabled&&ntohl(stSa.sin_addr.s_addr)!=trusted_proxy)
+   {
+      CloseSocket(iSocket);
+      Log("Rejected connection outside trusted proxy transport address.\n");
+      return FALSE;
+   }
    if(fcntl(iSocket,F_SETFL,O_NONBLOCK)<0)
    {
       CloseSocket(iSocket);
@@ -730,14 +763,16 @@ bool NewConnection(int iSocket)
 
    /* Calculate and store the ip address of the new connection */
    pstConn->iIp=ntohl(stSa.sin_addr.s_addr);
+   pstConn->proxy_pending=proxy_enabled?TRUE:FALSE;
+   if(pstConn->proxy_pending)
+      pstConn->proxy_deadline=AuthClock()+10;
 
    /* Log the connection */
    Log("Connection from %d.%d.%d.%d\n",IP(3),IP(2),IP(1),IP(0));
 
    /* Greet the new connection */
-   PutOutput(pstConn,TO_USER,"Welcome to the Gladiator Pits!\n\r");
-   PutOutput(pstConn,TO_USER,"Use register <account> or login <account> before create <character>.\n\r"
-      "Password traffic requires a TLS gateway or secure tunnel; TCP alone is not encrypted.\n\r");
+   if(!pstConn->proxy_pending)
+      GreetConnection(pstConn);
 
    /* New connection was successfully created, so return TRUE */
    return TRUE;

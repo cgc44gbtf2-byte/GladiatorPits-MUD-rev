@@ -1,3 +1,4 @@
+# Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
 """Bounded, opt-in multiplayer soak. Only synthetic, temporary data is used."""
 
 import argparse
@@ -93,6 +94,7 @@ def main():
     assert 15 <= args.seconds <= 3600, "Use a bounded 15..3600 second duration"
     binary, admin = str(Path(args.binary).resolve()), str(Path(args.admin).resolve())
     env = dict(os.environ, GLAD_BIND_ADDRESS="127.0.0.1")
+    env.pop("GLAD_TRUSTED_PROXY", None)
     all_peers, processes, samples = [], [], []
     expected = {f"Soaka{chr(97+i)}": [0, 0, 0] for i in range(24)}
     names = list(expected)

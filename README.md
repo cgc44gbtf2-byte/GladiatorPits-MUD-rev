@@ -1,10 +1,15 @@
 # Gladiator Pits
 
-[![Build status](https://ci.appveyor.com/api/projects/status/e4l064rgu0fe5hax?svg=true)](https://ci.appveyor.com/project/servusDei2018/gladiatorpits-mud)
+[![Native CI](https://github.com/cgc44gbtf2-byte/GladiatorPits-MUD-rev/actions/workflows/native-ci.yml/badge.svg)](https://github.com/cgc44gbtf2-byte/GladiatorPits-MUD-rev/actions/workflows/native-ci.yml)
 
 (A Go rewrite is available [here](https://github.com/servusDei2018/GladiatorPits-Go).)
 
 ### Building
+
+This candidate is a clean public source release with fresh accounts/characters,
+not the planned derivative. Read [RELEASE.md](RELEASE.md) for fresh installation,
+source artifact validation, approval/rollback gates and secure-hosting caveats.
+See [release notes](RELEASE_NOTES.md) and [attribution](THIRD_PARTY_NOTICES.md).
 
 This maintains the [original](https://github.com/servusdei2018/GladiatorPits-MUD/tree/original) C game rather than rewriting it. The modernization pass preserves its stat formulas, training rules, PvP combat, progression, and native binary player record layout while improving I/O safety, persistence, and portability. See [MODERNIZATION.md](MODERNIZATION.md) for the audit, phased plan, change/failure log, and remaining issues.
 
@@ -31,6 +36,12 @@ The server now binds **127.0.0.1** by default. Put it behind a TLS-capable MUD
 gateway or secure tunnel before transmitting passwords remotely. An explicit
 IPv4 `GLAD_BIND_ADDRESS` can override the interface for a protected deployment;
 it does not enable TLS by itself.
+
+For gateways that send PROXY v1, optional `GLAD_TRUSTED_PROXY` preserves full
+IPv4/IPv6 client identity without sharing every player's login-limit bucket.
+This strictly trusts one actual gateway address and requires a valid header
+before any application traffic; it is disabled by default. Read
+[HOSTING.md](HOSTING.md) for setup, threat boundaries, tests and an HAProxy example.
 
 Telnet negotiation and subnegotiation frames are consumed separately from game
 commands/passwords, including across fragmented reads. Unsupported options are
@@ -94,11 +105,13 @@ they retain that value and log the ceiling instead of wrapping negative.
 
 ### Tests
 
-Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
-in-game staff integration tests use Python 3's standard library:
+Runtime dependencies are libsodium, SQLite, and POSIX threads. Test/release tools
+use Python 3.10+ standard libraries; the TLS fixture also uses the OpenSSL command
+to generate a disposable certificate (not a MUD runtime dependency).
 
 ```sh
-make check       # 1006 game + 159 account + 479 storage checks; all three TCP suites
+make release-check # source payload check BEFORE building, in a fresh checkout
+make check       # 1111 game + 159 account + 479 storage + 19 release; five TCP/TLS suites
 make soak-test   # optional five-minute, 32-client multiplayer run; temporary data only
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
@@ -138,7 +151,14 @@ Richard Woolcock wrote in `glad.txt`, <blockquote>This code is copyrighted to me
 you wish, so long as you don't remove the copyright notices from any source 
 files containing any of the mud source code.</blockquote>
 
-And therefore, the most applicable license appears to be the MIT license.
+The repository retains the MIT text inherited from upstream in [LICENSE](LICENSE),
+alongside the original permission above. Preserve both that file and original
+source notices when redistributing or deriving from this code. This modernization
+does not relicense the original work. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+for checked provenance and dependency attribution.
+
+Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
+Richard Woolcock's original game copyright and permission notices remain intact.
 
 ### Disclaimer
 

@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /*
  * Small regression tests for the existing Gladiator Pits rules.
  * Run in an isolated directory because the game stores player files there.
@@ -37,6 +38,56 @@ static void Check(int condition, const char *message)
       exit(EXIT_FAILURE);
    }
    tests_run++;
+}
+
+static void TestTrustedProxyHeaders(void)
+{
+   conn_t connection=stConnEmpty;
+   const char *header="PROXY TCP6 2001:db8::1 2001:db8::2 12345 4000\r\n";
+   conn_t *previous=pstFirstConn;
+   size_t index;
+   pstFirstConn=&connection;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()+10;
+   for(index=0;header[index];index++)
+   {
+      Check(ProxyData(&connection,(unsigned char)header[index]),"bytewise PROXY header accepted");
+      if(header[index+1])
+         Check(connection.proxy_pending&&connection.iOutLen==0,
+            "fragmented header neither admits nor emits a banner early");
+   }
+   Check(!connection.proxy_pending&&connection.proxy_ipv6&&
+      OutputContains(&connection,"Welcome"),"IPv6 proxy header admits once");
+   Check(connection.proxy_length==0&&connection.proxy_header[0]=='\0',
+      "accepted proxy header buffer is cleared");
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   for(index=0;index<5;index++)
+      Check(AuthRateAllowedKey(connection.proxy_address),"IPv6 peer budget available");
+   Check(!AuthRateAllowedKey(connection.proxy_address),"IPv6 sixth attempt limited");
+   connection.proxy_address[15]++;
+   Check(AuthRateAllowedKey(connection.proxy_address),"full IPv6 address keys are independent");
+   connection=stConnEmpty;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()-1;
+   Check(ProxyExpired(&connection)&&!ProxyData(&connection,'P'),
+      "expired proxy header rejects new data at input time");
+   connection=stConnEmpty;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()+10;
+   memset(connection.proxy_header,'X',sizeof(connection.proxy_header));
+   connection.proxy_length=sizeof(connection.proxy_header)-1;
+   Check(!ProxyData(&connection,'X'),"proxy header cap checked before write");
+   connection=stConnEmpty;
+   connection.proxy_pending=TRUE;
+   connection.proxy_deadline=AuthClock()+10;
+   strcpy(connection.a_chInBuf,"register Bypassed");
+   ParseInput(&connection);
+   Check(connection.auth_stage==AUTH_IDLE&&connection.iOutLen==0,
+      "command dispatch cannot bypass pending proxy admission");
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   pstFirstConn=previous;
 }
 
 static void ResetWorld(void)
@@ -1737,6 +1788,7 @@ int main(void)
    TestFailedOutputAuthorization();
    TestProgressionCounterLimits();
    TestTelnetInput();
+   TestTrustedProxyHeaders();
    TestExpiredAuthenticationInput();
    TestArenaAllocationLimits();
    TestCombatPendingDisconnect();

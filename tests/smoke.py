@@ -1,3 +1,4 @@
+# Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
 """Exercise the actual TCP server using only disposable player records."""
 
 import os
@@ -89,7 +90,8 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     admin = str(Path(sys.argv[2]).resolve())
     clients = []
-    environment = dict(os.environ)
+    environment = dict(os.environ, GLAD_BIND_ADDRESS="127.0.0.1")
+    environment.pop("GLAD_TRUSTED_PROXY", None)
     with tempfile.TemporaryDirectory(prefix="gladiatorpits-smoke-") as directory:
         process = None
 

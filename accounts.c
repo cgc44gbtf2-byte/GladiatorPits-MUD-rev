@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Account metadata is deliberately separate from the historical player ABI. */
 #define _POSIX_C_SOURCE 200809L
 #include "accounts.h"

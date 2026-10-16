@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
 """Storage failures/recovery against real production TCP binaries, in a fixture."""
 from pathlib import Path
 import os
@@ -13,7 +14,8 @@ from smoke import Client, wait_for_port
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     admin = str(Path(sys.argv[2]).resolve())
-    environment = dict(os.environ)
+    environment = dict(os.environ, GLAD_BIND_ADDRESS="127.0.0.1")
+    environment.pop("GLAD_TRUSTED_PROXY", None)
     clients = []
     processes = []
     with tempfile.TemporaryDirectory(prefix="glad-storage-smoke-") as directory:

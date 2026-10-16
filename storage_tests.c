@@ -1,4 +1,5 @@
 /* Run only in the disposable .storage-test-run directory. */
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 #define _POSIX_C_SOURCE 200809L
 #include "player_storage.h"
 #include <stdio.h>

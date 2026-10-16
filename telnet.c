@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Included by glad.c. Consume Telnet framing before interpreting game input.
  * Keep only state, never a subnegotiation buffer; payload length is untrusted.
  * The game does not use terminal/window/binary options. Existing server ECHO

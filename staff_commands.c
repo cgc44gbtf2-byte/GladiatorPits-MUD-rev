@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Included by glad.c. Only the game thread reads live connections or applies
  * staff changes; the auth worker verifies passwords but never edits accounts. */
 

@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 #ifndef GLAD_PLAYER_STORAGE_H
 #define GLAD_PLAYER_STORAGE_H
 

@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /******************************************************************************
  Program     : The Gladiator Pits.
  Author      : Richard Woolcock (aka KaVir).

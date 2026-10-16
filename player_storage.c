@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Recoverable native player storage for The Gladiator Pits.
  * Original player layout: Copyright (C) 2000 Richard Woolcock; retained.
  * Gameplay/account metadata are not changed by journal replay. */

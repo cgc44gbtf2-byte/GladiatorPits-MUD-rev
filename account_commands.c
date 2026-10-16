@@ -1,3 +1,4 @@
+/* Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami). */
 /* Included by glad.c, like the historical commands.c. No gameplay state is
  * touched by the worker: only the main thread owns connection objects. */
 #define AUTH_JOB_COUNT 8
@@ -28,7 +29,7 @@ static uint64_t next_connection_token;
 /* Main-thread issued, never reused; zero means there is no pending request. */
 static uint64_t next_auth_request_token;
 static struct {
-   uint32_t ip;
+   unsigned char ip[16];
    time_t window;
    unsigned int attempts;
 } auth_ip_limits[AUTH_IP_BUCKETS];
@@ -77,13 +78,13 @@ static int AccountInputExpired(conn_t *connection)
    return 1;
 }
 
-static int AuthRateAllowed(uint32_t ip)
+static int AuthRateAllowedKey(const unsigned char ip[16])
 {
    size_t i,slot=0;
    time_t now=AuthClock();
    for(i=0;i<AUTH_IP_BUCKETS;i++)
    {
-      if(auth_ip_limits[i].attempts&&auth_ip_limits[i].ip==ip)
+      if(auth_ip_limits[i].attempts&&memcmp(auth_ip_limits[i].ip,ip,16)==0)
       {
          slot=i;
          break;
@@ -91,9 +92,9 @@ static int AuthRateAllowed(uint32_t ip)
       if(auth_ip_limits[i].window<auth_ip_limits[slot].window)
          slot=i;
    }
-   if(auth_ip_limits[slot].ip!=ip||now-auth_ip_limits[slot].window>=60)
+   if(memcmp(auth_ip_limits[slot].ip,ip,16)!=0||now-auth_ip_limits[slot].window>=60)
    {
-      auth_ip_limits[slot].ip=ip;
+      memcpy(auth_ip_limits[slot].ip,ip,16);
       auth_ip_limits[slot].window=now;
       auth_ip_limits[slot].attempts=0;
    }
@@ -107,6 +108,15 @@ static int AuthRateAllowed(uint32_t ip)
    auth_ip_limits[slot].attempts++;
    auth_global_attempts++;
    return 1;
+}
+
+static int AuthRateAllowed(uint32_t ip)
+{
+   unsigned char key[16]={0};
+   uint32_t network=htonl(ip);
+   key[10]=key[11]=255;
+   memcpy(&key[12],&network,sizeof(network));
+   return AuthRateAllowedKey(key);
 }
 
 static void *AuthWorker(void *unused)
@@ -195,7 +205,8 @@ static void AccountQueue(conn_t *connection,int operation,const char *password)
       PutOutput(connection,TO_USER,"Authentication unavailable; contact staff.\n\r");
       return;
    }
-   if(!AuthRateAllowed(connection->iIp))
+   if(!(connection->proxy_ipv6?AuthRateAllowedKey(connection->proxy_address):
+         AuthRateAllowed(connection->iIp)))
    {
       AccountCancel(connection);
       PutOutput(connection,TO_USER,"Authentication limit reached; try again in one minute.\n\r");
@@ -297,6 +308,11 @@ static int AccountPoll(void)
    }
    for(connection=pstFirstConn;connection;connection=connection->pstNext)
    {
+      if(ProxyExpired(connection))
+      {
+         connection->bClosing=TRUE;
+         continue;
+      }
       if(connection->auth_stage!=AUTH_IDLE&&now>=connection->auth_deadline)
       {
          AccountCancel(connection);

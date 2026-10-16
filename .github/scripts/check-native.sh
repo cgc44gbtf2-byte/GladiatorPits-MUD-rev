@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Modernization contributions: Copyright (c) 2026 LaWaylon Battles (aKa Yami).
 # Shared CI/local entry point; never runs against a live game data directory.
 set -euo pipefail
 
