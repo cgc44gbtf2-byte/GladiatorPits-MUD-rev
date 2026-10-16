@@ -172,9 +172,10 @@ Failures encountered and resolved:
 
 ### Remaining limits and deployment checklist
 
-- Back up character files and account storage together. Use SQLite's online
-  backup facility or stop the server before copying the database; copying only
-  the main DB while WAL is active is not a consistent backup.
+- Back up character files, account storage and any pending `.glad-settlement`
+  together with the server stopped, or using a coordinated filesystem snapshot.
+  SQLite's online backup alone is consistent only for that database, not the
+  whole game's files. Copying only the main DB while WAL is active is unsafe.
 - Protect filesystem access and database backups. Losing ownership metadata must
   not trigger public re-claiming of legacy characters. No account reset or
   destructive migration is performed by startup.
@@ -194,9 +195,11 @@ Failures encountered and resolved:
   its loopback IP, sharing that five-per-minute budget. Real-IP preservation or a
   reviewed gateway/limit adaptation is required for higher-volume deployment;
   this server does not parse or trust arbitrary forwarded-IP headers.
-- Credential-store failures deny access. Disk-full/fault-injection, high-load
-  stress, third-party security review, and real legacy-player migration have not
-  been executed. TLS gateway/client compatibility must be tested before release.
+- Credential-store failures deny access. Deterministic storage ENOSPC/EIO,
+  interrupted-settlement replay and fixture backup/restore are covered in
+  [STORAGE_RECOVERY.md](STORAGE_RECOVERY.md). Actual disk exhaustion, physical
+  power loss, high-load stress, third-party security review and real legacy-player
+  migration remain untested. Test TLS gateway/client compatibility before release.
 - Native save ABI, original progression and combat/permadeath behavior remain
   unchanged. No live player data, production configuration or `master` branch was
   modified. Original copyright notices, LICENSE and `glad.txt` remain intact.

@@ -121,13 +121,49 @@ storage/recovery checks and all three TCP suites passed** before final matrix
 verification. The expected-failing reproduction left only disposable test-owned
 artifacts; `make clean` removed those fixtures before re-running the complete suite.
 
+### Increment 4: backup rehearsal, diagnostics and final verification
+
+The production-binary TCP suite now copies the stopped fixture's account metadata,
+character state and pending intent into a different private directory. That
+restored instance replays intent, authenticates the original owner, loads the
+trained character and shuts down through ordinary staff permissions. The original
+fixture remains unchanged and subsequently recovers independently.
+
+Storage/startup failures also emit console diagnostics because disk-full may
+prevent file logging. Expected failing TCP processes must exit 1 and emit the
+appropriate storage diagnostic, without sanitizer markers. Healthy processes
+must exit 0 with empty stderr. Four intentionally injected native gameplay faults
+also emit expected console messages per matrix entry.
+
+The first matrix passed both GCC modes; Clang then rejected a test-fixture byte
+as potentially uninitialized after a short-circuited Check call. Explicit
+initialization corrected the fixture, without changing production behavior.
+
+Final local shared CI entry point: **all four GCC 15.3.0 / Clang 20.1.8 optimized
+and ASan/UBSan entries passed: 1006 game/runtime + 159 account/security + 479
+storage/recovery checks and all three real-TCP suites per entry**. Leak detection
+and strict warnings enabled; no sanitizer findings in exercised paths. Production
+`glad` and `glad-smoke` symbol checks show no fault-injection hook/state symbols.
+
+Final GCC/Clang bounded analyzers complete without diagnostics on all five
+production translation units, including the new backend (ten invocations).
+Limits: 35 seconds each, 384/512 MiB virtual memory; Clang max-nodes=5000.
+The local Clang wrapper's unused linker-argument diagnostic is suppressed only
+for analysis. These checks do not establish exhaustive path coverage.
+
+Native layout/gameplay regressions, added-line whitespace and historical CRLF
+styles remain verified. Hosted run/log evidence is recorded in draft PR #6's
+verification body, tied to its current head rather than creating a recursive
+commit that merely inserts its own run URL. No merge or deployment performed.
+
 ## Operator procedure
 
 - Keep the data directory and files owned by the game's OS user; do not make it
   group/world writable. Native storage requires POSIX locking, rename and fsync.
 - `.glad-storage.lock` is an advisory lock inode, not a stale PID flag. Never delete
   it to bypass a live server. Stop the competing process instead.
-- On a storage error, the server stops with exit status 1. Fix disk capacity,
+- On a storage error, the server stops with exit status 1 and a console diagnostic
+  even if disk-full also prevents `log.txt` writes. Fix disk capacity,
   permissions or unsafe targets while retaining the journal and player records.
   Restarting the same build completes a valid `.glad-settlement` before listening.
 - Do not delete or edit a pending/corrupt journal as a routine recovery step.
@@ -136,6 +172,10 @@ artifacts; `make clean` removed those fixtures before re-running the complete su
 - `.glad-tmp.*` files can remain after abrupt termination. They are not authoritative
   and are not automatically swept. Retain them during investigation; any later
   cleanup must be restricted to confirmed test/orphan files with the server stopped.
+- Never start an older build against pending intent or alongside this server.
+  Older versions do not honor the journal/lock. For rollback, first finish pending
+  recovery using the compatible build and stop cleanly, or restore a coordinated
+  pre-upgrade backup. Do not simply discard intent to make an old build start.
 - Back up pending intent together with characters and account DB/ownership metadata.
   Do not copy just SQLite's main database while WAL is active.
 

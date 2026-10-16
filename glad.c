@@ -246,12 +246,15 @@ int main(void)
    umask(0077);
    if(!AccountRuntimeStart())
    {
+      fprintf(stderr,"Cannot initialize private account storage/authentication worker.\n");
       Log("Cannot initialize private account storage/authentication worker.\n");
       return EXIT_FAILURE;
    }
    if(!PlayerStorageOpen())
    {
-      Log("Cannot lock/recover player storage: %s. No listener opened.\n",strerror(errno));
+      int error=errno;
+      fprintf(stderr,"Cannot lock/recover player storage: %s. No listener opened.\n",strerror(error));
+      Log("Cannot lock/recover player storage: %s. No listener opened.\n",strerror(error));
       AccountRuntimeStop();
       return EXIT_FAILURE;
    }
@@ -1240,6 +1243,9 @@ void ClearChallenge(conn_t*pstConn)
 static void StorageFailure(const char *operation)
 {
    int error=errno;
+   /* Disk-full may also prevent log.txt writes; retain a console diagnostic. */
+   fprintf(stderr,"Player storage %s failed: %s. Gameplay halted; recovery required.\n",
+      operation,strerror(error));
    Log("Player storage %s failed: %s. Gameplay halted; recovery required.\n",
       operation,strerror(error));
    bStorageFailed=TRUE;

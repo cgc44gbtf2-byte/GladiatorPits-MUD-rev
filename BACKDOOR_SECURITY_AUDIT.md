@@ -161,6 +161,8 @@ These bounded checks are not exhaustive.
 
 No active hardcoded backdoor was identified in the reviewed source. This is not
 proof of absence across unreviewed binaries, Git history, dependencies or deployed
-systems. Previous save/disk-full/death-file cleanup and cross-record crash-recovery
-limits remain; native character ABI and gameplay are not changed by this work.
+systems. Storage-specific limits at this audit's baseline are superseded by
+[STORAGE_RECOVERY.md](STORAGE_RECOVERY.md): checked saves, journaled settlement
+and injected-error/restart tests are now implemented. Physical power-loss and
+production-load limits remain. Native character ABI and gameplay are unchanged.
 No merge, deployment or branch-protection change is authorized by this audit.

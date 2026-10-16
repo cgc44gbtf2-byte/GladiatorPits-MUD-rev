@@ -98,7 +98,7 @@ Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
 in-game staff integration tests use Python 3's standard library:
 
 ```sh
-make check       # 961 game + 159 account checks, gameplay and in-game staff TCP suites
+make check       # 1006 game + 159 account + 479 storage checks; all three TCP suites
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```
@@ -113,6 +113,10 @@ The [backdoor/security follow-up](BACKDOOR_SECURITY_AUDIT.md) records the histor
 shutdown credential review, failed-output authorization guards, safe disabled-owner
 cleanup, privileged-name tests and randomized timing-only dummy hash.
 The Makefile preserves the required C99 dialect when overriding `CFLAGS`.
+The [storage recovery guide](STORAGE_RECOVERY.md) describes checked saves,
+recoverable surrender/permadeath settlement, startup replay, the data-directory
+lock and coordinated backups. Storage errors stop gameplay instead of silently
+continuing; retain pending intent for recovery rather than deleting it.
 
 Tests use disposable directories and an ephemeral TCP port, not live player records. GCC 15 and Clang 20 have been verified; use `make clean` before switching compiler or build flags.
 

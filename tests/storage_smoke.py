@@ -2,6 +2,7 @@
 """Storage failures/recovery against real production TCP binaries, in a fixture."""
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,23 +19,31 @@ def main():
     with tempfile.TemporaryDirectory(prefix="glad-storage-smoke-") as directory:
         root = Path(directory)
 
-        def spawn():
+        def spawn(cwd=directory):
             process = subprocess.Popen(
-                [binary], cwd=directory, env=environment,
+                [binary], cwd=cwd, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             processes.append(process)
             return process
 
-        def start():
-            (root / "log.txt").unlink(missing_ok=True)
-            process = spawn()
-            return process, wait_for_port(process, directory)
+        def start(cwd=directory):
+            (Path(cwd) / "log.txt").unlink(missing_ok=True)
+            process = spawn(cwd)
+            return process, wait_for_port(process, cwd)
 
         def stopped(process, code):
             _, stderr = process.communicate(timeout=8)
             assert process.returncode == code, "Unexpected storage server exit status"
-            assert not stderr, "Storage server produced stderr/sanitizer diagnostics"
+            if code == 0:
+                assert not stderr, "Healthy storage server produced stderr"
+            else:
+                assert stderr.startswith((b"Player storage ",
+                                          b"Cannot lock/recover player storage:")), \
+                    "Expected a visible storage-failure console diagnostic"
+                assert not any(marker in stderr for marker in
+                               (b"AddressSanitizer", b"LeakSanitizer", b"runtime error:")), \
+                    "Storage server produced sanitizer diagnostics"
 
         def connect(port):
             client = Client(port)
@@ -70,6 +79,24 @@ def main():
             assert journal.read_bytes() == damaged, "Invalid intent was silently changed"
             journal.write_bytes(prepared)  # Only repair this deliberately corrupted fixture.
             (root / "Storagehero").rmdir()
+            # Coordinated stopped-server backup includes ownership and pending intent.
+            # Restore into a separate directory, never over the original.
+            with tempfile.TemporaryDirectory(prefix="glad-storage-restore-") as restored:
+                shutil.copytree(root, restored, dirs_exist_ok=True)
+                restored_process, restored_port = start(restored)
+                restored_client = connect(restored_port)
+                restored_client.authenticate("Storageuser")
+                restored_client.send("create Storagehero", "score")
+                restored_client.expect(b"Str:9 Dex:9 Sta:9 Siz:2 Wit:1")
+                operation = subprocess.run(
+                    [admin, "role", "Storageuser", "administrator"], cwd=restored,
+                    env=environment, capture_output=True, timeout=8,
+                )
+                assert operation.returncode == 0 and not operation.stderr, \
+                    "Restored fixture administrator assignment failed"
+                restored_client.send("shutdown")
+                stopped(restored_process, 0)
+                assert journal.read_bytes() == prepared, "Restore altered original pending intent"
             process, port = start()
             assert not journal.exists(), "Successful recovery did not retire its intent"
             client = connect(port)
@@ -87,7 +114,7 @@ def main():
             stopped(process, 0)
             print("Storage recovery TCP passed: failed save halts, exclusive lock, "
                   "blocked/invalid intent refuses startup, replay preserves training, "
-                  "ownership/login and ordinary staff shutdown.")
+                  "coordinated backup/restore, ownership/login and ordinary staff shutdown.")
         finally:
             for client in clients:
                 client.close()
