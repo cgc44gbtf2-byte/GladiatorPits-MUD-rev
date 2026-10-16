@@ -57,6 +57,21 @@ permadeath, permissions and the historical native player-record ABI. No rewrite.
   entropy-quality proof.
 - Strict optimized GCC passes 637 game/runtime + 120 account checks and both
   TCP suites after increment 2.
+- Increment 3 found that normal server shutdown left live connection/body
+  allocations rooted in the global list until process exit. This is retained
+  ownership, not a demonstrated unreachable leak: leak sanitizers can consider
+  globally reachable allocations live. Added explicit shutdown destruction and
+  a shared storage destructor that wipes full connection/body allocations before
+  freeing them, including queued input/output and credential buffers.
+- Shutdown deliberately does not call ordinary surrender settlement or save
+  unfinished combat/training: the previous restart semantics and existing
+  record bytes are preserved. The worker is joined before shutdown storage
+  destruction. Normal disconnect still settles and saves as before.
+- A fixture with two fighters, an anonymous client, partial/password buffers
+  and three actual socket pairs verifies empty ownership/descriptor sets,
+  closed client descriptors, byte-identical pre-fight records and idempotent
+  cleanup. Strict GCC passes 659 game/runtime + 120 account checks and both
+  TCP suites after increment 3.
 
 ## Coverage limits
 

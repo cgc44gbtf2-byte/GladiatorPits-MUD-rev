@@ -134,6 +134,7 @@ void    Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
 static void IncrementProgression(int *counter,const char *name,const char *field);
 static int RollD10(void);
+static void ReleaseConnections(void);
 
 /******************************************************************************
  Required global variables.
@@ -261,6 +262,7 @@ int main(void)
    /* Close the main socket */
    close(iControl);
    AccountRuntimeStop();
+   ReleaseConnections();
 
    /* Exit the program */
    return 0;
@@ -733,6 +735,32 @@ bool NewConnection(int iSocket)
  *
  * This function has no return value.
  */
+/* Storage destruction is shared by ordinary disconnect and orderly shutdown.
+ * It does not settle fights, save records or follow opponent pointers. */
+static void FreeConnectionStorage(conn_t *connection)
+{
+   if(connection->pstBody)
+   {
+      sodium_memzero(connection->pstBody,sizeof(*connection->pstBody));
+      free(connection->pstBody);
+   }
+   sodium_memzero(connection,sizeof(*connection));
+   free(connection);
+}
+
+static void ReleaseConnections(void)
+{
+   while(pstFirstConn)
+   {
+      conn_t *connection=pstFirstConn;
+      pstFirstConn=connection->pstNext;
+      FlushOutput(connection);
+      CloseSocket(connection->iSocket);
+      FreeConnectionStorage(connection);
+   }
+   FD_ZERO(&a_sFd);
+}
+
 void CloseConnection(conn_t*pstConn)
 {
    /* Must free their body, if they've created one */
@@ -770,7 +798,6 @@ void CloseConnection(conn_t*pstConn)
       }
 
       PutOutput(pstConn,TO_WORLD,"%s vanishes into the crowd.\n\r",pstConn->pstBody->a_chName);
-      free(pstConn->pstBody);
    }
 
    /* Have a quick flush in case there is any pending output */
@@ -788,10 +815,7 @@ void CloseConnection(conn_t*pstConn)
 
    /* Close and free the socket */
    CloseSocket(pstConn->iSocket);
-   sodium_memzero(pstConn->auth_password,sizeof(pstConn->auth_password));
-   sodium_memzero(pstConn->auth_old_password,sizeof(pstConn->auth_old_password));
-   sodium_memzero(pstConn->a_chInBuf,sizeof(pstConn->a_chInBuf));
-   free(pstConn);
+   FreeConnectionStorage(pstConn);
 }
 
 

@@ -262,6 +262,63 @@ static void TestCombatRandomness(void)
       "resetting the public libc seed cannot replay the production combat dice stream");
 }
 
+static void TestShutdownStorageCleanup(void)
+{
+   conn_t *first=HeapCombatPair(),*second=first->pstNext;
+   conn_t *anonymous=calloc(1,sizeof(*anonymous));
+   conn_t *connections[3]={first,second,anonymous};
+   const char *names[2]={"Attacker","Defender"};
+   body_t before[2],after;
+   int sockets[3][2],i;
+   Check(anonymous!=NULL,"shutdown anonymous connection allocation");
+   second->pstNext=anonymous;
+   anonymous->pstPrev=second;
+   anonymous->eStatus=CROWD;
+   for(i=0;i<3;i++)
+   {
+      Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets[i])==0,"shutdown fixture sockets");
+      Check(fcntl(sockets[i][0],F_SETFL,O_NONBLOCK)==0,"shutdown output stays nonblocking");
+      connections[i]->iSocket=sockets[i][0];
+      FD_SET(sockets[i][0],&a_sFd);
+   }
+   Save(first->pstBody);
+   Save(second->pstBody);
+   for(i=0;i<2;i++)
+   {
+      FILE *file=fopen(names[i],"rb");
+      Check(file&&fread(&before[i],sizeof(before[i]),1,file)==1,
+         "shutdown snapshot of pre-fight save");
+      fclose(file);
+   }
+   SetInput(first,"challenge Defender");
+   SetInput(second,"accept");
+   first->auth_stage=AUTH_NEW_PASSWORD;
+   strcpy(first->auth_password,"shutdown-fixture-password-only");
+   strcpy(first->auth_old_password,"shutdown-fixture-old-password-only");
+   anonymous->auth_stage=AUTH_LOGIN_PASSWORD;
+   strcpy(anonymous->a_chInBuf,"shutdown-partial-fixture");
+   anonymous->iInLen=(int)strlen(anonymous->a_chInBuf);
+   ReleaseConnections();
+   Check(pstFirstConn==NULL,"orderly shutdown releases the complete connection/body ownership list");
+   for(i=0;i<3;i++)
+   {
+      Check(fcntl(sockets[i][0],F_GETFD)==-1&&errno==EBADF&&
+         !FD_ISSET(sockets[i][0],&a_sFd),"shutdown closes and unregisters every client socket");
+      close(sockets[i][1]);
+   }
+   for(i=0;i<2;i++)
+   {
+      FILE *file=fopen(names[i],"rb");
+      Check(file&&fread(&after,sizeof(after),1,file)==1,"shutdown record remains readable");
+      fclose(file);
+      Check(memcmp(&after,&before[i],sizeof(after))==0,
+         "shutdown does not invent surrender counters or overwrite pre-fight saves");
+      unlink(names[i]);
+   }
+   ReleaseConnections();
+   Check(pstFirstConn==NULL,"shutdown storage cleanup is idempotent");
+}
+
 static void TestCharacterCreation(void)
 {
    conn_t stConn;
@@ -1320,6 +1377,7 @@ int main(void)
    TestCombatPendingDisconnect();
    TestCombatRules();
    TestCombatRandomness();
+   TestShutdownStorageCleanup();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
