@@ -245,14 +245,20 @@ static int AccountPoll(void)
       if(connection&&connection->auth_stage==AUTH_WAIT&&!connection->bClosing&&
          result.request_token!=0&&connection->auth_request_token==result.request_token)
       {
+         /* Check before cancellation clears the deadline, for every operation. */
+         if(now>=connection->auth_deadline)
+         {
+            connection->bClosing=TRUE;
+            PutOutput(connection,TO_USER,result.operation==4?
+               "Staff action expired; no change applied.\n\r":
+               "Authentication expired; reconnect and log in.\n\r");
+            AccountCancel(connection);
+            sodium_memzero(&result,sizeof(result));
+            continue;
+         }
          if(result.operation==4)
          {
-            if(now>=connection->auth_deadline)
-            {
-               connection->bClosing=TRUE;
-               PutOutput(connection,TO_USER,"Staff action expired; no change applied.\n\r");
-            }
-            else if(result.ok&&AccountSessionRole(result.session)!=ROLE_NONE)
+            if(result.ok&&AccountSessionRole(result.session)!=ROLE_NONE)
                StaffApply(connection,result.staff_target,result.staff_operation,result.staff_value);
             else
                PutOutput(connection,TO_USER,"Staff password verification failed; no change applied.\n\r");

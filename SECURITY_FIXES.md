@@ -51,6 +51,16 @@ remaining limitations below. Update draft PR #3 only; do not merge or deploy.
 - After increment 1, strict optimized GCC passed 203 game/runtime + 120 account
   checks and both TCP suites. Coverage includes cancelled staff replay, stale
   successful/failed logins, matching prompted identity and token exhaustion.
+- Increment 2: the new inclusive-deadline matrix failed on a completed generic
+  authentication result before the fix. All matching results now check the
+  deadline before resetting prompt state or accepting a session/action.
+  Successes and failures at expired deadlines close the connection; live
+  results retain their existing behavior. Strict optimized GCC then passed
+  254 game/runtime + 120 account checks and both TCP suites.
+- Discarding a late/cancelled response cannot undo an account registration or
+  password change the worker has already committed. Such results do not grant
+  a session. Staff mutations are different: the worker performs only password
+  proof, and the main-thread commit requires the current request and deadline.
 
 ## Release boundary
 

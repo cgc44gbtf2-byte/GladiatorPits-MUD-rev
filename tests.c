@@ -630,6 +630,64 @@ static void TestAuthenticationReplay(void)
    pstFirstConn=NULL;
 }
 
+static void TestCompletedAuthenticationDeadlines(void)
+{
+   account_session owner;
+   conn_t connection;
+   int sockets[2],operation,expired,success;
+   Check(AccountRegister("Expiryowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Expiryowner",ROLE_OWNER),"deadline owner fixture");
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"deadline socket fixture");
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   for(operation=1;operation<=4;operation++)
+      for(expired=0;expired<=1;expired++)
+         for(success=0;success<=1;success++)
+         {
+            connection=stConnEmpty;
+            connection.iSocket=sockets[0];
+            connection.eStatus=CROWD;
+            connection.connection_token=30001;
+            connection.iIp=(uint32_t)(8000+operation);
+            strcpy(connection.account_name,"Regtest");
+            if(operation==3)
+               connection.account=regression_account;
+            if(operation==4)
+            {
+               connection.account=owner;
+               strcpy(connection.account_name,"Expiryowner");
+               connection.staff_target=regression_account.id;
+               connection.staff_operation=1;
+               connection.staff_value=ROLE_BUILDER;
+               Check(AccountSetRole("Regtest",ROLE_PLAYER),"deadline target reset");
+            }
+            pstFirstConn=&connection;
+            memset(auth_jobs,0,sizeof(auth_jobs));
+            AccountQueue(&connection,operation,"regression-test-password-only");
+            Check(auth_jobs[0].state==1,"deadline fixture queued");
+            connection.auth_deadline=AuthClock()+(expired?0:120);
+            auth_jobs[0].state=3;
+            auth_jobs[0].ok=success;
+            auth_jobs[0].session=operation==4?owner:regression_account;
+            AccountPoll();
+            Check(connection.auth_stage==AUTH_IDLE&&connection.auth_request_token==0&&
+               connection.bClosing==(expired?TRUE:FALSE),
+               "all completed results respect inclusive deadlines, including failures");
+            if(operation<=2)
+               Check(connection.account.id==(!expired&&success?regression_account.id:0),
+                  "expired registration/login result never grants a session");
+            if(operation==4)
+               Check(AccountSessionRole(regression_account)==
+                  (!expired&&success?ROLE_BUILDER:ROLE_PLAYER),
+                  "expired staff proof never commits its pending mutation");
+         }
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore deadline target");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   close(sockets[0]);
+   close(sockets[1]);
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -752,6 +810,7 @@ int main(void)
    TestSavedInspection();
    TestInGameStaff();
    TestAuthenticationReplay();
+   TestCompletedAuthenticationDeadlines();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
