@@ -103,6 +103,9 @@ make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```
 
+The [GitHub CI guide](CI.md) documents automatic GCC/Clang optimized and
+ASan/UBSan checks, local reproduction, permissions and hosted-run results.
+
 Tests use disposable directories and an ephemeral TCP port, not live player records. GCC 15 and Clang 20 have been verified; use `make clean` before switching compiler or build flags.
 
 ### History
