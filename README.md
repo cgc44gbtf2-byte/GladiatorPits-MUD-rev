@@ -99,6 +99,7 @@ in-game staff integration tests use Python 3's standard library:
 
 ```sh
 make check       # 1006 game + 159 account + 479 storage checks; all three TCP suites
+make soak-test   # optional five-minute, 32-client multiplayer run; temporary data only
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```
@@ -117,6 +118,9 @@ The [storage recovery guide](STORAGE_RECOVERY.md) describes checked saves,
 recoverable surrender/permadeath settlement, startup replay, the data-directory
 lock and coordinated backups. Storage errors stop gameplay instead of silently
 continuing; retain pending intent for recovery rather than deleting it.
+The opt-in [multiplayer soak](SOAK_TEST.md) checks simultaneous duels, disconnect
+settlement, connection/authentication pressure, sampled resources and restart
+ownership/progress. It is bounded validation, not a production capacity claim.
 
 Tests use disposable directories and an ephemeral TCP port, not live player records. GCC 15 and Clang 20 have been verified; use `make clean` before switching compiler or build flags.
 

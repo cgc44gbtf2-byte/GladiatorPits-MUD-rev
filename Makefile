@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: all clean test account-test storage-test integration-test staff-integration-test storage-integration-test check sanitize
+.PHONY: all clean test account-test storage-test integration-test staff-integration-test storage-integration-test soak-test check sanitize
 
 CC ?= cc
 CFLAGS ?= -O2
@@ -56,6 +56,11 @@ staff-integration-test: glad-smoke glad-admin
 
 storage-integration-test: glad-smoke glad-admin
 	python3 tests/storage_smoke.py ./glad-smoke ./glad-admin
+
+# Opt-in only: bounded real-time exercise, not part of each required CI job.
+SOAK_SECONDS ?= 300
+soak-test: glad-smoke glad-admin
+	python3 tests/soak.py ./glad-smoke ./glad-admin --seconds $(SOAK_SECONDS)
 
 check: test account-test storage-test integration-test staff-integration-test storage-integration-test
 
