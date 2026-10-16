@@ -896,6 +896,12 @@ static void IncrementProgression(int *counter,const char *name,const char *field
          name,field);
 }
 
+static int CombatPendingDisconnect(const conn_t *first,const conn_t *second)
+{
+   return first->bClosing||first->bWriteFailed||
+      second->bClosing||second->bWriteFailed;
+}
+
 void Update(void)
 {
    conn_t*pstConn,*pstUser,*pstConnNext;
@@ -914,6 +920,11 @@ void Update(void)
       /* Insert stuff like combat, etc, here */
       if(pstConn->eStatus==FIGHTING)
       {
+         pstUser=pstBody->pstOpponent;
+         /* The loop closes marked connections after this pulse. Neither end
+          * may turn that pending surrender into a lethal attack meanwhile. */
+         if(CombatPendingDisconnect(pstConn,pstUser))
+            continue;
          if(++pstBody->iSpeed>=SPEED(pstBody))
          {
             /* Reset the speed counter (three second recovery time) */
@@ -953,6 +964,10 @@ void Update(void)
             /* Display the appropriate message */
             PutOutput(pstConn,TO_USER,"You %s your opponent!\n\r",szYou);
             PutOutput(pstUser,TO_USER,"Your opponent %s you!\n\r",szThem);
+
+            /* Enqueuing those messages can discover a failed/slow socket. */
+            if(CombatPendingDisconnect(pstConn,pstUser))
+               continue;
 
             /* Inflict the damage */
             pstBody2->iDam+=iDam;

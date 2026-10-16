@@ -64,6 +64,78 @@ static int StatTotal(const body_t *pstBody)
    return iTotal;
 }
 
+static conn_t *HeapCombatPair(void)
+{
+   conn_t *first=calloc(1,sizeof(*first)),*second=calloc(1,sizeof(*second));
+   int i;
+   Check(first&&second,"combat lifecycle connection allocations");
+   first->pstBody=calloc(1,sizeof(*first->pstBody));
+   second->pstBody=calloc(1,sizeof(*second->pstBody));
+   Check(first->pstBody&&second->pstBody,"combat lifecycle body allocations");
+   strcpy(first->pstBody->a_chName,"Attacker");
+   strcpy(second->pstBody->a_chName,"Defender");
+   for(i=STR;i<=WIT;i++)
+      first->pstBody->iStats[i]=second->pstBody->iStats[i]=1;
+   first->iSocket=second->iSocket=-1;
+   first->account=second->account=regression_account;
+   first->eStatus=second->eStatus=GLADIATOR;
+   first->pstNext=second;
+   second->pstPrev=first;
+   pstFirstConn=first;
+   FD_ZERO(&a_sFd);
+   return first;
+}
+
+static void TestCombatPendingDisconnect(void)
+{
+   int variant,i;
+   saved_character saved;
+   for(variant=0;variant<6;variant++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      conn_t *departing=(variant&1)?second:first;
+      conn_t *remaining=departing==first?second:first;
+      char departed_name[16];
+      strcpy(departed_name,departing->pstBody->a_chName);
+      for(i=STR;i<=WIT;i++)
+         first->pstBody->iStats[i]=9;
+      Save(first->pstBody);
+      Save(second->pstBody);
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      if(variant<2)
+         departing->bClosing=TRUE;
+      else if(variant<4)
+         departing->bWriteFailed=TRUE;
+      else
+      {
+         /* Trigger a real failed FlushOutput during attack-message enqueue. */
+         memset(departing->a_chOutBuf,'x',MAX_BUF-2);
+         departing->iOutLen=MAX_BUF-2;
+      }
+      Update();
+      Check(first->pstBody&&second->pstBody&&first->pstBody->iDam==0&&
+         second->pstBody->iDam==0&&first->pstBody->iWin==0&&
+         first->pstBody->iKill==0&&second->pstBody->iWin==0,
+         "pending disconnect cannot inflict a lethal hit before surrender cleanup");
+      Check(CharacterInspect("Defender",&saved)==1&&saved.damage==0,
+         "pending disconnect never deletes the opponent's persisted record");
+      if(variant>=4)
+         Check(departing->bWriteFailed,"attack-message failure is detected before committing damage");
+      CloseConnection(departing);
+      Check(pstFirstConn==remaining&&remaining->pstBody->iWin==1&&
+         remaining->pstBody->iKill==0&&remaining->pstBody->iRoom==0&&
+         remaining->pstBody->pstOpponent==NULL&&remaining->eStatus==GLADIATOR,
+         "closing either fighter awards one surrender win, no kill, and clears links");
+      Check(CharacterInspect(departed_name,&saved)==1&&saved.losses==1,
+         "departing fighter retains a valid record with one surrender loss");
+      CloseConnection(remaining);
+      Check(pstFirstConn==NULL,"combat disconnect fixtures release every connection");
+      unlink("Attacker");
+      unlink("Defender");
+   }
+}
+
 static void TestCharacterCreation(void)
 {
    conn_t stConn;
@@ -1119,6 +1191,7 @@ int main(void)
    TestTelnetInput();
    TestExpiredAuthenticationInput();
    TestArenaAllocationLimits();
+   TestCombatPendingDisconnect();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
