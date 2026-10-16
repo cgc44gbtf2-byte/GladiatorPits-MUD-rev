@@ -13,18 +13,23 @@
 
 CMD(Quit)
 {
+   (void)szTxt;
    /* Exit message, if required (had to remove due to space restrictions) */
 
-   /* Close down the socket and tidy up */
-   CloseConnection(pstConn);
+   /* Let the loop close it after input processing has returned safely. */
+   pstConn->bClosing=TRUE;
 }
 
 CMD(Shutdown)
 {
+   const char *szPassword=getenv("GLAD_SHUTDOWN_PASSWORD");
+
    /* If there is no input with the command, send a message and return */
    NO_INPUT("Syntax: shutdown <password>\n\r");
 
-   if(strcmp(szTxt,"topsecret"))
+   if(!szPassword||!szPassword[0])
+      PutOutput(pstConn,TO_USER,"Remote shutdown is not configured.\n\r");
+   else if(strcmp(szTxt,szPassword))
       PutOutput(pstConn,TO_USER,"Incorrect password.\n\r");
    else
    {
@@ -41,75 +46,103 @@ CMD(Shutdown)
 CMD(Create)
 {
    int i=0;
+   body_t *pstBody;
+   FILE *pPlayerFile;
+   bool bValid;
 
    /* If there is no input with the command, send a message and return */
    NO_INPUT("Syntax: create <name>\n\r");
 
    if(strlen(szTxt)<3||strlen(szTxt)>15)
+   {
       PutOutput(pstConn,TO_USER,"Names must be 3-15 letters long.\n\r");
-   else if(FindPerson(szTxt))
+      return;
+   }
+   if(!ValidPlayerName(szTxt))
+   {
+      PutOutput(pstConn,TO_USER,"Name must only contain letters.\n\r");
+      return;
+   }
+   if(FindPerson(szTxt))
+   {
       PutOutput(pstConn,TO_USER,"That name is in use.\n\r");
-   else if(!(pstConn->pstBody=(body_t*)malloc(sizeof(body_t))))
+      return;
+   }
+   if(!(pstBody=(body_t*)malloc(sizeof(body_t))))
+   {
       Log("BUG: Cannot malloc.\n");
+      return;
+   }
    else/* The name was acceptable and a body was created */
    {
       do /* loop through the name */
       {
-         /* Make sure that the name only contains letters */
-         if (!isalpha(szTxt[i]))
-         {
-            PutOutput(pstConn,TO_USER,"Name must only contain letters.\n\r");
-            return;
-         }
-
          /* Convert the letters to lower case, if they're not already */
-         szTxt[i]|=32;
+         szTxt[i]=(char)tolower((unsigned char)szTxt[i]);
       }
       while(szTxt[++i]);
 
       /* Make the first letter of the name uppercase */
-      szTxt[0]-=32;
+      szTxt[0]=(char)toupper((unsigned char)szTxt[0]);
 
       /* Look for an existing player file */
-      if((pFile=fopen(szTxt,"rb")))
+      if((pPlayerFile=fopen(szTxt,"rb")))
       {
-         /* Load the player file */
-         fread(pstConn->pstBody,sizeof(body_t),1,pFile);
+         /* Reject damaged or incompatible records without overwriting them. */
+         bValid=fread(pstBody,sizeof(body_t),1,pPlayerFile)==1&&
+            fgetc(pPlayerFile)==EOF&&!ferror(pPlayerFile)&&
+            ValidPlayer(pstBody,szTxt);
 
          /* Close the player file */
-         fclose(pFile);
+         fclose(pPlayerFile);
+         if(!bValid)
+         {
+            free(pstBody);
+            PutOutput(pstConn,TO_USER,"Player file is damaged or incompatible; it was not changed.\n\r");
+            Log("Rejected invalid player file for %s.\n",szTxt);
+            return;
+         }
 
          /* Clear their pointer variable */
-         pstConn->pstBody->pstOpponent=NULL;
+         pstBody->pstOpponent=NULL;
 
          /* Set the connection to GLADIATOR status */
          pstConn->eStatus=GLADIATOR;
 
          /* Start them in the stadium */
-         pstConn->pstBody->iRoom=0;
+         pstBody->iRoom=0;
 
          /* Log the load */
          Log("%s has rejoined.\n",szTxt);
       }
       else/* No player file exists yet for that name */
       {
+         if(errno!=ENOENT)
+         {
+            free(pstBody);
+            PutOutput(pstConn,TO_USER,"Unable to read that player file; it was not changed.\n\r");
+            Log("Cannot read player file for %s.\n",szTxt);
+            return;
+         }
          /* Clear the body structure */
-         *(pstConn->pstBody)=stBodyEmpty;
+         *pstBody=stBodyEmpty;
 
          /* The connection is now a CITIZEN */
          pstConn->eStatus=CITIZEN;
 
          /* Initialise the body's stats to 1 */
          for(i=STR;i<=WIT;i++)
-            pstConn->pstBody->iStats[i]=1;
+            pstBody->iStats[i]=1;
 
          /* Store the name of the body */
-         strcpy(pstConn->pstBody->a_chName,szTxt);
+         strcpy(pstBody->a_chName,szTxt);
 
          /* Log the new body's creation */
          Log("New person '%s' created.\n",szTxt);
       }
 
+      /* Attach only a fully initialized and validated character. */
+      pstConn->pstBody=pstBody;
       /* Display the message to the user and others in the room */
       PutOutput(pstConn,TO_USER,"You step from the crowd.\n\r");
       PutOutput(pstConn,TO_ROOM,"%s steps from the crowd.\n\r",szTxt);
@@ -149,6 +182,7 @@ CMD(Emote)
 CMD(Commands)
 {
    int i,iCount=0;
+   (void)szTxt;
 
    /* Loop through all the commands in the command table */
    for(i=0;kstCmdTable[i].szCommand!=NULL;i++)
@@ -169,6 +203,7 @@ CMD(Who)
    conn_t*pstUser;
    body_t*pstBody;
    int iCrowd=0,iCount=0;
+   (void)szTxt;
 
    /* Loop through all of the connections */
    for(pstUser=pstFirstConn;pstUser;pstUser=pstUser->pstNext)
@@ -209,6 +244,10 @@ CMD(Challenge)
       PutOutput(pstConn,TO_USER,"You must both be in the stadium.\n\r");
    else
    {
+      /* Replacing either side must not leave a dangling old challenge. */
+      ClearChallenge(pstConn);
+      ClearChallenge(pstUser);
+
       /* Send the challenge message */
       PutOutput(pstConn,TO_USER,"You challenge %s to a fight.\n\r",szTxt);
       PutOutput(pstUser,TO_USER,"%s challenges you to a fight.\n\r",
@@ -217,10 +256,6 @@ CMD(Challenge)
       /* Indicate that you're now the challenger */
       pstConn->eStatus=CHALLENGER;
       pstUser->eStatus=GLADIATOR;
-
-      /* If they've been challenged already, clear the old one */
-      if (pstUser->pstBody->pstOpponent)
-         pstUser->pstBody->pstOpponent->pstBody->pstOpponent=NULL;
 
       /* Set the two players as opponents */
       pstConn->pstBody->pstOpponent=pstUser;
@@ -232,10 +267,12 @@ CMD(Accept)
 {
    conn_t*pstUser;
    static int s_iArena;
+   (void)szTxt;
 
    NEED_BODY; /* Logs an error and returns, if pstConn has no body */
 
-   if (!(pstUser=pstConn->pstBody->pstOpponent))
+   if (!(pstUser=pstConn->pstBody->pstOpponent)||!pstUser->pstBody||
+       pstUser->pstBody->pstOpponent!=pstConn||pstUser->eStatus!=CHALLENGER)
       PutOutput(pstConn,TO_USER,"You've not been challenged.\n\r");
    else
    {
@@ -262,6 +299,7 @@ CMD(Accept)
 
 CMD(Train)
 {
+   (void)szTxt;
    NEED_BODY; /* Logs an error and returns, if pstConn has no body */
 
    /* The connection is now in TRAINING */
@@ -283,6 +321,7 @@ CMD(Train)
 CMD(Leave)
 {
    int i,iCount=0;
+   (void)szTxt;
 
    NEED_BODY; /* Logs an error and returns, if pstConn has no body */
 
@@ -316,30 +355,35 @@ CMD(Leave)
 
 CMD(Str)
 {
+   (void)szTxt;
    /* Increase the connection's strength, if possible */
    TrainStat(pstConn,"strength",STR);
 }
 
 CMD(Dex)
 {
+   (void)szTxt;
    /* Increase the connection's dexterity, if possible */
    TrainStat(pstConn,"dexterity",DEX);
 }
 
 CMD(Sta)
 {
+   (void)szTxt;
    /* Increase the connection's stamina, if possible */
    TrainStat(pstConn,"stamina",STA);
 }
 
 CMD(Siz)
 {
+   (void)szTxt;
    /* Increase the connection's size, if possible */
    TrainStat(pstConn,"size",SIZ);
 }
 
 CMD(Wit)
 {
+   (void)szTxt;
    /* Increase the connection's wits, if possible */
    TrainStat(pstConn,"wits",WIT);
 }
@@ -347,6 +391,7 @@ CMD(Wit)
 CMD(Score)
 {
    body_t*pstBody=pstConn->pstBody;
+   (void)szTxt;
 
    /* Display the score to the connection */
    PutOutput(pstConn,TO_USER,

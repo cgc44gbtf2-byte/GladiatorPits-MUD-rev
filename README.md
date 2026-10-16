@@ -6,9 +6,35 @@
 
 ### Building
 
-This is a slightly modified version of the [original](https://github.com/servusdei2018/GladiatorPits-MUD/tree/original) source, modified only insofar as to make it compile on modern distros, and includes a Makefile.
+This maintains the [original](https://github.com/servusdei2018/GladiatorPits-MUD/tree/original) C game rather than rewriting it. The modernization pass preserves its stat formulas, training rules, PvP combat, progression, and native binary player record layout while improving I/O safety, persistence, and portability. See [MODERNIZATION.md](MODERNIZATION.md) for the audit, phased plan, change/failure log, and remaining issues.
 
-To build, just run `make`.
+Build on a POSIX system with a C99 compiler and Make:
+
+```sh
+make
+```
+
+The default TCP port remains 3000. A different port can be selected at build time, for example with `make CPPFLAGS=-DPORT=4000`.
+
+### Running and player data
+
+Run the executable from a private data directory: player records and `log.txt` are stored in its working directory. Back up existing player files before testing any new build. No migration or reset is performed; records from incompatible architectures or damaged files are rejected without modification.
+
+The `shutdown` command is retained, but its former public source-code credential is no longer used. Configure `GLAD_SHUTDOWN_PASSWORD` through your runtime environment or secret store; do not commit it. If it is unset or empty, remote shutdown is denied.
+
+This is still the original passwordless character-loading model over plain TCP. Do not treat this pass as production authentication or transport security. The historical `glad.txt` is retained unchanged, but its old shutdown credential instructions are superseded by this README.
+
+### Tests
+
+The game has no third-party runtime packages. The TCP smoke test needs Python 3's standard library:
+
+```sh
+make check       # 100 core regression checks plus a real TCP smoke test
+make sanitize    # repeat both suites with AddressSanitizer and UndefinedBehaviorSanitizer
+make clean
+```
+
+Tests use disposable directories and an ephemeral TCP port, not live player records. GCC 15 and Clang 20 have been verified; use `make clean` before switching compiler or build flags.
 
 ### History
 

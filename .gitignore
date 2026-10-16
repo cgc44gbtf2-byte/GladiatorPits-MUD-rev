@@ -1,0 +1,6 @@
+/glad
+/glad-tests
+/glad-smoke
+/.test-run/
+/log.txt
+__pycache__/
