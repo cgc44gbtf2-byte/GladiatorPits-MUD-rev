@@ -142,6 +142,45 @@ static void DisabledOwnerCleanup(void)
       "last active owner stays protected after cleanup and re-enable");
 }
 
+static void PrivilegedNameChecks(int64_t target)
+{
+   static const char *names[]={"Admin","Administrator","Owner","Root","KaVir"};
+   account_session guest,authenticated;
+   staff_account row;
+   size_t i;
+   for(i=0;i<sizeof(names)/sizeof(names[0]);i++)
+   {
+      Check(AccountRegister(names[i],test_password,&guest),
+         "privileged-looking account name can register normally");
+      Check(AccountSessionRole(guest)==ROLE_PLAYER&&
+         !AccountRoleCan(AccountSessionRole(guest),PERM_SHUTDOWN)&&
+         !AccountRoleCan(AccountSessionRole(guest),PERM_ROLES_MANAGE),
+         "privileged-looking name never grants an implicit staff role");
+      Check(AccountLogin(names[i],test_password,&authenticated)&&
+         authenticated.id==guest.id&&AccountSessionRole(authenticated)==ROLE_PLAYER,
+         "privileged-looking name authenticates only its own player session");
+      Check(!AccountLogin(names[i],replacement,&authenticated)&&
+         authenticated.id==0&&authenticated.epoch==0,
+         "privileged-looking name has no wrong-password bypass");
+      Check(!AccountStaffRole(guest,target,ROLE_OWNER)&&
+         !AccountStaffAccess(guest,target,1)&&AccountStaffList(guest,0,&row,1)==-1,
+         "privileged-looking names cannot mutate or inspect private staff data");
+   }
+   Check(Scalar("SELECT role='builder' AND disabled=0 FROM accounts WHERE name='Alice'")==1,
+      "rejected privileged-name actions leave target role/access unchanged");
+   Check(!AccountLogin("Unknownfixture",test_password,&authenticated)&&
+      authenticated.id==0&&authenticated.epoch==0,
+      "random dummy hash never authenticates a nonexistent account");
+   AccountsClose();
+   Check(AccountsOpen("test-accounts.sqlite3"),"restart regenerates only the timing dummy hash");
+   Check(!AccountLogin("Unknownfixture",test_password,&authenticated)&&
+      authenticated.id==0&&authenticated.epoch==0,
+      "nonexistent account remains denied after dummy hash regeneration");
+   Check(AccountLogin("Owner",test_password,&authenticated)&&
+      AccountSessionRole(authenticated)==ROLE_PLAYER,
+      "dummy hash regeneration preserves actual player credentials and permissions");
+}
+
 int main(void)
 {
    account_session alice,bob,login,old;
@@ -226,6 +265,7 @@ int main(void)
       "security changes have audit records");
    StaffTests(login,bob);
    DisabledOwnerCleanup();
+   PrivilegedNameChecks(alice.id);
    AccountsClose();
    Check(chmod("test-accounts.sqlite3",0644)==0,"insecure-mode fixture");
    Check(!AccountsOpen("test-accounts.sqlite3"),"publicly readable database rejected");

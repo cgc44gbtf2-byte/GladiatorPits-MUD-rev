@@ -95,7 +95,23 @@ active owner, audited demotion, retained disabled state and safe re-enablement w
 fresh player-only credentials. GCC optimized strict C99: **961 + 129 checks and
 both TCP suites passed**.
 
-Further increments and final matrix results pending.
+### Increment 3: default-credential hygiene and privileged names
+
+Replace the non-account dummy hash's fixed input with 32 random bytes generated
+by libsodium for each database opening. Wipe that temporary material whether
+hashing succeeds or fails. Stored player hashes, password rules, Argon2id cost,
+schema and login/session checks are unchanged.
+
+Thirty additional account checks register five privileged-looking names (including
+`Admin`, `Owner`, `Root` and the historical author's handle), verify ordinary player
+roles, reject wrong passwords and direct staff API attempts, and check account
+behavior across regeneration/restart. An initial assertion incorrectly expected
+the earlier fixture's target to remain administrator; that fixture had legitimately
+demoted it to builder. The assertion was corrected to the established fixture state.
+
+GCC optimized strict C99: **961 + 159 checks and both TCP suites passed**.
+
+Build compatibility and final matrix results pending.
 
 ## Limits
 

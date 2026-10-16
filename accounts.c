@@ -48,6 +48,20 @@ static int Audit(const char *event,int64_t id)
    return ok;
 }
 
+/* Equal-cost missing-account verification, without a fixed password-like input.
+ * This hash is never attached to an account or used to grant a session. */
+static int CreateDummyHash(void)
+{
+   char input[32];
+   int result;
+   randombytes_buf(input,sizeof(input));
+   result=crypto_pwhash_str_alg(dummy_hash,input,(unsigned long long)sizeof(input),
+      crypto_pwhash_OPSLIMIT_INTERACTIVE,crypto_pwhash_MEMLIMIT_INTERACTIVE,
+      crypto_pwhash_ALG_ARGON2ID13);
+   sodium_memzero(input,sizeof(input));
+   return result==0;
+}
+
 int AccountsOpen(const char *path)
 {
    struct stat info;
@@ -99,9 +113,7 @@ int AccountsOpen(const char *path)
       "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
       "PRAGMA user_version=2;")||!Execute("COMMIT"))
       goto failed;
-   if(crypto_pwhash_str_alg(dummy_hash,"dummy-not-a-login-password",26,
-      crypto_pwhash_OPSLIMIT_INTERACTIVE,crypto_pwhash_MEMLIMIT_INTERACTIVE,
-      crypto_pwhash_ALG_ARGON2ID13)!=0)
+   if(!CreateDummyHash())
       goto failed;
    return 1;
 failed:
