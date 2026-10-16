@@ -11,7 +11,8 @@ PKG_CONFIG ?= pkg-config
 ACCOUNT_FLAGS = $(shell $(PKG_CONFIG) --cflags libsodium sqlite3)
 ACCOUNT_LIBS = $(shell $(PKG_CONFIG) --libs libsodium sqlite3) -pthread
 
-CFLAGS += -std=c99
+# Keep the required language dialect when callers override optimization flags.
+override CFLAGS += -std=c99
 
 all: glad glad-admin
 

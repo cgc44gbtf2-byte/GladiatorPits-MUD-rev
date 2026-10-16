@@ -111,7 +111,51 @@ demoted it to builder. The assertion was corrected to the established fixture st
 
 GCC optimized strict C99: **961 + 159 checks and both TCP suites passed**.
 
-Build compatibility and final matrix results pending.
+### Increment 4: modern compiler flag overrides
+
+The initial `make CFLAGS='-O2 -Werror' test` failed before executing tests because
+command-line flags replaced the Makefile's ordinary `CFLAGS += -std=c99`.
+GCC's newer default dialect reserves `bool`, conflicting with the legacy typedef.
+Use `override CFLAGS += -std=c99` to retain the existing supported dialect rather
+than rewrite gameplay types. The shared CI script now intentionally omits the
+dialect from its caller-supplied flags, exercising this Makefile guarantee in
+every compiler/mode job without changing the workflow or required-check names.
+
+Forced rebuild with the original failing flag override: **961 + 159 checks and
+both TCP suites passed**. README counts and the follow-up audit link are updated.
+
+The first full matrix passed both GCC modes, then Clang rejected one new test's
+implicit legacy-enum-to-`int` conversion under `-Werror`. The assertion now uses an
+explicit comparison with `FALSE`; production behavior is unchanged. The full
+matrix is rerun after that correction.
+
+Both bounded analyzers complete without source diagnostics on all four production
+translation units (eight invocations). Limits: 35 seconds each; GCC 384 MiB VM,
+Clang 512 MiB VM and max-nodes=5000. Clang analysis initially rejected an unused
+linker argument injected by the local Nix compiler wrapper; disabling that
+command-line-only diagnostic allowed analysis without suppressing source warnings.
+These bounded checks are not exhaustive.
+
+### Final local verification
+
+- All four GCC 15.3.0 / Clang 20.1.8 optimized and ASan/UBSan entries pass the
+  shared CI script: **961 game/runtime + 159 account/security checks and both
+  real-TCP suites per entry**. Leak detection and strict warnings are enabled.
+  No sanitizer findings in the exercised paths. This adds 103 game/runtime and
+  39 account/security assertions over the baseline.
+- An additional real-TCP probe reads the historical shutdown argument into memory
+  without printing or copying it into new source. Anonymous and ordinary-player
+  attempts using that exact argument are denied. Explicit local promotion to
+  administrator then permits normal shutdown without an argument. Server/admin
+  processes exit successfully with empty sanitizer stderr. This extra one-off
+  probe is separate from the counted shared-script regressions.
+- Targeted searches on all eight production C source files find no outbound
+  connection calls, process execution/dynamic loading, startup-constructor hooks
+  or encoded-payload decoders. No production default-account bootstrap is present.
+- Added-line whitespace and retained historical CRLF style are checked. All
+  source additions are explicit; no binary, cache or test-data file is published.
+- Hosted verification is maintained in PR #6's body, tied to its current head,
+  rather than creating a new untested commit just to insert its own run URL here.
 
 ## Limits
 
