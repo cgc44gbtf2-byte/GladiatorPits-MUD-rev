@@ -19,11 +19,11 @@ def main():
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return child, wait_for_port(child, directory)
 
-        def connect(port, name=None, register=False):
+        def connect(port, name=None, register=False, telnet=False):
             client = Client(port)
             clients.append(client)
             if name:
-                client.authenticate(name, register=register)
+                client.authenticate(name, register=register, telnet=telnet)
             return client
 
         def local(*arguments):
@@ -39,17 +39,19 @@ def main():
             assert b"AddressSanitizer" not in stderr and b"runtime error:" not in stderr
             assert PASSWORD.encode() not in stdout + stderr
 
-        def change(client, command, success=True, password=PASSWORD):
+        def change(client, command, success=True, password=PASSWORD, telnet=False):
             client.send(command)
             client.expect(b"Type CONFIRM")
             client.send("CONFIRM")
             client.expect(b"Current staff password: ")
+            if telnet:
+                client.socket.sendall(bytes((255, 253, 1, 255, 250, 31, 0, 80, 0, 10, 255, 240)))
             client.send(password)
             client.expect(b"Staff change applied and audited." if success else b"no change applied")
 
         try:
             process, port = start()
-            owner = connect(port, "Ownerdemo", True)
+            owner = connect(port, "Ownerdemo", True, telnet=True)
             local("role", "Ownerdemo", "owner")
             mod = connect(port, "Moddemo", True)
             local("role", "Moddemo", "moderator")
@@ -92,7 +94,7 @@ def main():
             owner = connect(port, "Ownerdemo")
             mod = connect(port, "Moddemo")
             player = connect(port, "Playerdemo")
-            change(owner, "staff role Builddemo moderator")
+            change(owner, "staff role Builddemo moderator", telnet=True)
             mod.send("staff disable Ownerdemo")
             mod.expect(b"Permission denied")
             mod.send("staff role Playerdemo owner")
@@ -151,7 +153,7 @@ def main():
             for file in Path(directory).iterdir():
                 if file.name.startswith("accounts.sqlite3") or file.name == "log.txt":
                     assert PASSWORD.encode() not in file.read_bytes()
-            print("In-game staff TCP passed: menus/roles, live/saved inspection, confirmation, "
+            print("In-game staff TCP passed: Telnet password proofs, menus/roles, live/saved inspection, confirmation, "
                   "password proofs, moderation, audit, restart, revocation and disconnected actions.")
         finally:
             for client in clients:

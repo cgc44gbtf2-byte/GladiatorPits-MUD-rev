@@ -25,7 +25,7 @@ account-test: account-tests
 	@mkdir -p .account-test-run
 	@cd .account-test-run && ../account-tests
 
-GAME_SOURCES = glad.c commands.c account_commands.c staff_commands.c accounts.c accounts.h player_record.c player_record.h
+GAME_SOURCES = glad.c commands.c account_commands.c staff_commands.c telnet.c accounts.c accounts.h player_record.c player_record.h
 
 glad: $(GAME_SOURCES)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ glad.c accounts.c player_record.c $(LDLIBS) $(ACCOUNT_LIBS)

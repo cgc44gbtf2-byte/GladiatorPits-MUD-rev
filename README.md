@@ -32,6 +32,11 @@ gateway or secure tunnel before transmitting passwords remotely. An explicit
 IPv4 `GLAD_BIND_ADDRESS` can override the interface for a protected deployment;
 it does not enable TLS by itself.
 
+Telnet negotiation and subnegotiation frames are consumed separately from game
+commands/passwords, including across fragmented reads. Unsupported options are
+refused; terminal-size payloads are ignored rather than interpreted as input.
+This framing support is not TLS or a complete terminal/line-editing implementation.
+
 Use `register <account>` or `login <account>` and answer the separate password
 prompts, then `create <character>` as before. Passwords are 15-128 printable ASCII
 characters, stored only as Argon2id hashes. `password` changes your password and
@@ -79,13 +84,18 @@ staff credentials exist. Read [DASHBOARD.md](DASHBOARD.md) before upgrading:
 account schema 1 → 2 is additive, but back up/stage data and upgrade the game and
 local admin tool together. Native player files are not migrated.
 
+See [SECURITY_FIXES.md](SECURITY_FIXES.md) for the subsequent request-cancellation,
+deadline, progression-overflow and Telnet fixes, their tests and remaining limits.
+Native win/loss/kill counters retain their existing `int` layout; at `INT_MAX`
+they retain that value and log the ceiling instead of wrapping negative.
+
 ### Tests
 
 Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
 in-game staff integration tests use Python 3's standard library:
 
 ```sh
-make check       # 175 game + 120 account checks, gameplay and in-game staff TCP suites
+make check       # 342 game + 120 account checks, gameplay and in-game staff TCP suites
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```

@@ -69,6 +69,38 @@ remaining limitations below. Update draft PR #3 only; do not merge or deploy.
   271 game/runtime + 120 account checks and both TCP suites. New coverage checks
   `INT_MAX-1` to `INT_MAX`, repeated awards at the ceiling, surrender, loadable
   saved progression and unchanged permadeath.
+- Increment 4: the new valid-NAWS test first failed because a width byte became
+  part of `who`. Added a bounded streaming Telnet control-frame parser before
+  line processing. It retains only parser state across reads, consumes
+  subnegotiation payloads/escaped IAC, refuses unsupported WILL/DO options, and
+  accepts the acknowledgment of existing password ECHO announcements.
+  WONT/DONT acknowledgments do not trigger reply loops. Existing printable
+  ASCII filtering, application-line limits and CRLF behavior remain intact.
+- GCC ASan/UBSan with undefined-behavior recovery disabled then passed
+  342 game/runtime + 120 account checks and both TCP suites. Added coverage
+  includes every option byte under all four negotiation verbs, NUL option
+  replies, bytewise fragmentation, control commands, oversized subnegotiations,
+  embedded newlines/quit text, escaped IAC, password non-disclosure and
+  unchanged password bytes. Real TCP registration/login and staff password
+  proofs also exercise NAWS and password echo acknowledgments; plaintext
+  clients remain covered separately.
+- One multi-file patch initially missed the smoke-test print-line context;
+  that file was unchanged by the failed hunk and was patched with the actual
+  context before verification. No runtime or authorization failure was bypassed.
+
+## Final verification
+
+- GCC 15.3.0 and Clang 20.1.8: optimized production builds and ASan/UBSan
+  builds with all strict warnings plus `-Werror` pass **342 game/runtime +
+  120 account/security checks and both TCP suites**. Sanitizer runs enable
+  leak detection and halt on undefined behavior. No sanitizer findings remain
+  in these exercised paths; this is not proof that all memory bugs are absent.
+- GCC `-fanalyzer` and Clang's analyzer complete without diagnostics on
+  `glad.c` (including command/Telnet sources), `accounts.c`, `player_record.c`
+  and `account_admin.c`. To avoid repeating the interrupted unbounded run,
+  analysis is sequential, wall-time/virtual-memory limited, with Clang's
+  per-top-level analysis bounded to 5,000 exploded nodes. These bounds limit
+  path exploration and are not an exhaustive verification claim.
 
 ## Release boundary
 
@@ -76,3 +108,11 @@ All fixtures are disposable. No real accounts, character records, deployment
 configuration or running production services are modified. Existing gameplay,
 permadeath, permissions, stats and native body layout remain in scope to preserve.
 Plain TCP still requires an external TLS gateway or private tunnel.
+
+Telnet terminal-size values and terminal-type payloads are intentionally unused.
+This is framing/negative negotiation support, not a full RFC 1143 option
+negotiator, binary terminal, line editor or tested production-client matrix.
+Native counters cannot represent values above `INT_MAX`; extending them needs
+a separate backward-compatible persistence design. These fixes do not claim
+full fuzz coverage, production-load/DoS resistance, crash/disk-full recovery,
+all-platform portability or a production security sign-off.

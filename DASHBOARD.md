@@ -58,10 +58,13 @@ cancels. No-op/self changes are rejected. Do not put passwords in arguments.
 Password proof shares the existing bounded worker queue and authentication
 budgets. No Argon2 work runs in the game loop. The worker verifies identity/epoch
 but cannot apply an action. Only the game thread, after finding the matching
-connection token and checking deadline/socket liveness, may call the
+connection token and unique request token and checking deadline/socket liveness, may call the
 transactional permission-checked staff functions. Unknown/disconnected results
 are discarded; revoked actor/target permissions are rechecked at commit time.
 Cancellation, failure and timeout wipe pending credentials/action metadata.
+Cancellation also invalidates the expected request token, so a completed proof
+from an old action cannot apply during a newer action on the same connection.
+All completed authentication responses check their deadline before acceptance.
 As with any network action, disconnect cannot undo a transaction already begun.
 
 Access changes revoke sessions; an affected fighter's disconnect follows the
@@ -128,6 +131,10 @@ automatic staff bootstrap or real player migration is performed.
   Incremental whitespace checks pass with the historical CRLF convention.
 
 ## Remaining issues and release boundary
+
+The post-dashboard audit found gaps in the original cancellation and deadline
+tests. [SECURITY_FIXES.md](SECURITY_FIXES.md) records the fixes, failing regressions
+and expanded verification; the matrix above describes the original increment.
 
 - No world/player CRUD editor, persistent area/item/mob schema, character
   transfer, recovery, MFA, fine-grained custom grants or real-player migration.

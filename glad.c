@@ -148,6 +148,8 @@ static struct connection
    bool     bWriteFailed,bClosing,bInputTooLong;
    account_session account;
    uint64_t connection_token,auth_request_token;
+   int telnet_state;
+   unsigned char telnet_command;
    int auth_stage;
    time_t auth_deadline;
    char account_name[ACCOUNT_NAME_MAX+1];
@@ -173,6 +175,7 @@ static void StaffApply(conn_t *connection,int64_t target,int operation,int value
 #include "account_commands.c"
 #include "commands.c"
 #include "staff_commands.c"
+#include "telnet.c"
 
 /* Create the command table */
 const cmd_table_t kstCmdTable[] =
@@ -377,6 +380,8 @@ bool GetInput(conn_t*pstConn)
    /* Process every complete line; TCP may deliver several in one read. */
    for(i=0;i<(int)iInput;i++)
    {
+      if(!TelnetData(pstConn,(unsigned char)a_chBuf[i]))
+         continue;
       if(a_chBuf[i]=='\n')
       {
          pstConn->a_chInBuf[pstConn->iInLen]='\0';

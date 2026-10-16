@@ -226,12 +226,20 @@ static void TestOutputSafety(void)
    pstFirstConn=NULL;
 }
 
+static int OutputHasBytes(conn_t *connection,const void *bytes,size_t length)
+{
+   size_t offset,total=(size_t)connection->iOutLen;
+   if(length>total)
+      return 0;
+   for(offset=0;offset<=total-length;offset++)
+      if(memcmp(connection->a_chOutBuf+offset,bytes,length)==0)
+         return 1;
+   return 0;
+}
+
 static int OutputContains(conn_t *pstConn,const char *szText)
 {
-   char a_chOutput[MAX_BUF];
-   memcpy(a_chOutput,pstConn->a_chOutBuf,(size_t)pstConn->iOutLen);
-   a_chOutput[pstConn->iOutLen]='\0';
-   return strstr(a_chOutput,szText)!=NULL;
+   return OutputHasBytes(pstConn,szText,strlen(szText));
 }
 
 static void TestInputAndQuit(void)
@@ -270,6 +278,101 @@ static void TestInputAndQuit(void)
       "quit defers freeing the connection until input handling returns");
    close(a_iSockets[0]);
    close(a_iSockets[1]);
+   pstFirstConn=NULL;
+}
+
+static void InputFragment(conn_t *connection,int peer,const unsigned char *bytes,size_t length)
+{
+   Check(write(peer,bytes,length)==(ssize_t)length&&GetInput(connection),
+      "Telnet input fragment processed");
+}
+
+static void TestTelnetInput(void)
+{
+   conn_t connection=stConnEmpty;
+   int sockets[2],command,option;
+   size_t i;
+   unsigned char large[MAX_BUF],matrix[256*3+4];
+   const unsigned char naws[]={255,250,31,0,80,0,24,255,240,'w','h','o','\n'};
+   const unsigned char controls[]={'w',255,241,'h',255,249,'o','\r','\n'};
+   const unsigned char escaped[]={
+      255,250,31,255,255,240,'q','u','i','t','\n',255,240,'w','h','o','\n'
+   };
+   const unsigned char negative_acks[]={255,252,80,255,254,0};
+   const unsigned char wont_binary[]={255,252,0},dont_naws[]={255,254,31};
+   const unsigned char sub_start[]={255,250,31},sub_end[]={255,240,'w','h','o','\n'};
+   const unsigned char password_controls[]={255,253,1,255,250,31,0,80,0,10,255,240};
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"Telnet socket fixture");
+   connection.iSocket=sockets[0];
+   connection.eStatus=CROWD;
+   connection.iIp=9000;
+   connection.connection_token=40001;
+   pstFirstConn=&connection;
+   InputFragment(&connection,sockets[1],naws,sizeof(naws));
+   Check(OutputContains(&connection,"visible")&&!OutputContains(&connection,"Unrecognised"),
+      "valid NAWS negotiation never contaminates a command");
+   connection.iOutLen=0;
+   for(i=0;i<sizeof(naws);i++)
+      InputFragment(&connection,sockets[1],naws+i,1);
+   Check(OutputContains(&connection,"visible")&&connection.iInLen==0,
+      "Telnet framing survives a read boundary after every byte");
+   connection.iOutLen=0;
+   InputFragment(&connection,sockets[1],controls,sizeof(controls));
+   Check(OutputContains(&connection,"visible"),"single-byte Telnet controls preserve CRLF commands");
+   connection.iOutLen=0;
+   for(i=0;i<sizeof(escaped);i++)
+      InputFragment(&connection,sockets[1],escaped+i,1);
+   Check(OutputContains(&connection,"visible")&&!connection.bClosing,
+      "escaped IAC and newline/quit bytes stay inside subnegotiation");
+   memset(large,'x',sizeof(large));
+   InputFragment(&connection,sockets[1],sub_start,sizeof(sub_start));
+   InputFragment(&connection,sockets[1],large,sizeof(large));
+   InputFragment(&connection,sockets[1],large,sizeof(large));
+   InputFragment(&connection,sockets[1],sub_end,sizeof(sub_end));
+   Check(connection.iInLen==0&&!connection.bInputTooLong,
+      "oversized subnegotiations consume constant state, not the application buffer");
+   for(command=251;command<=254;command++)
+   {
+      for(option=0;option<256;option++)
+      {
+         matrix[(size_t)option*3]=255;
+         matrix[(size_t)option*3+1]=(unsigned char)command;
+         matrix[(size_t)option*3+2]=(unsigned char)option;
+      }
+      memcpy(matrix+256*3,"who\n",4);
+      connection.iOutLen=0;
+      InputFragment(&connection,sockets[1],matrix,sizeof(matrix));
+      Check(OutputContains(&connection,"visible")&&!OutputContains(&connection,"Unrecognised"),
+         "every option byte is consumed by WILL/WONT/DO/DONT framing");
+      if(command==251)
+         Check(OutputHasBytes(&connection,dont_naws,sizeof(dont_naws)),
+            "unsupported remote options are refused");
+      if(command==253)
+         Check(OutputHasBytes(&connection,wont_binary,sizeof(wont_binary)),
+            "unsupported local binary option is refused with its NUL option byte");
+   }
+   connection.iOutLen=0;
+   InputFragment(&connection,sockets[1],negative_acks,sizeof(negative_acks));
+   Check(connection.iOutLen==0,"negative acknowledgments do not start negotiation loops");
+   SetInput(&connection,"login Regtest");
+   connection.iOutLen=0;
+   InputFragment(&connection,sockets[1],(const unsigned char*)"regression-",11);
+   for(i=0;i<sizeof(password_controls);i++)
+      InputFragment(&connection,sockets[1],password_controls+i,1);
+   Check(connection.auth_stage==AUTH_LOGIN_PASSWORD&&connection.iInLen==11&&
+      connection.iOutLen==0,"password echo acknowledgment and NAWS newline do not advance the prompt");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   InputFragment(&connection,sockets[1],(const unsigned char*)"test-password-only\n",19);
+   Check(auth_jobs[0].state==1&&
+      strcmp(auth_jobs[0].password,"regression-test-password-only")==0&&
+      !OutputContains(&connection,"regression-test-password-only")&&
+      connection.a_chInBuf[0]=='\0',"Telnet payload never changes, echoes or retains consumed password input");
+   AccountCancel(&connection);
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   close(sockets[0]);
+   close(sockets[1]);
    pstFirstConn=NULL;
 }
 
@@ -873,6 +976,7 @@ int main(void)
    TestAuthenticationReplay();
    TestCompletedAuthenticationDeadlines();
    TestProgressionCounterLimits();
+   TestTelnetInput();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
