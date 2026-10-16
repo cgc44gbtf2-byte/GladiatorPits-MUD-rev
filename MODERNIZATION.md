@@ -1,5 +1,10 @@
 # Gladiator Pits modernization
 
+This file records the first modernization increment. The subsequent
+[account/staff increment](ACCOUNTS.md) supersedes its no-authentication,
+no-runtime-dependency, shared-shutdown-password, and listener-interface notes.
+The original baseline and first-pass failures below remain as historical evidence.
+
 ## Scope and compatibility contract
 
 This repository is the 2000-era Gladiator Pits C source release. It contains
