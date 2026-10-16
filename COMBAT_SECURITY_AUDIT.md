@@ -72,6 +72,39 @@ permadeath, permissions and the historical native player-record ABI. No rewrite.
   closed client descriptors, byte-identical pre-fight records and idempotent
   cleanup. Strict GCC passes 659 game/runtime + 120 account checks and both
   TCP suites after increment 3.
+- Increment 4 first failed the heartbeat clock-domain regression. Combat had
+  used adjustable wall-clock seconds, so a backward clock correction could
+  suspend turns until wall time caught up. It now uses the existing monotonic
+  clock, and compares timestamps without signed subtraction.
+- Pulse cadence still allows at most one update per loop iteration, records
+  its timestamp after the update, and does not replay missed turns after lag.
+  Tests cover equal/forward/backward/unavailable samples and signed 64-bit
+  boundaries where applicable. No system clock was changed during testing.
+- Strict optimized GCC passes 665 game/runtime + 120 account checks and both
+  TCP suites after increment 4.
+
+## Final verification
+
+GCC 15.3.0 and Clang 20.1.8 optimized and ASan/UBSan entries all pass
+**665 game/runtime + 120 account/security checks and both real-TCP suites**.
+The shared CI entry point builds both production binaries with strict warnings
+and `-Werror`. Sanitizer entries enable leak detection and halt on undefined
+behavior; no findings occurred in exercised paths. No unreachable leak is
+claimed to have been reproduced merely from the prior global ownership.
+
+GCC's analyzer and bounded Clang analysis complete without diagnostics on all
+four native translation units. Runs are sequential, capped at 35 seconds and
+384/512 MiB virtual memory respectively; Clang exploration is limited to 5,000
+nodes per top-level analysis. These bounds limit path coverage.
+
+Native ABI and persisted-record regressions pass, historical CRLF is retained,
+and whitespace checks pass. Actual hosted results will be recorded in the PR
+description without modifying the tested source.
+
+The first final-matrix attempt passed GCC optimized and sanitizer entries, then
+Clang rejected an implicit unsigned-enum-to-int conversion in a new test's
+assertion under `-Werror`. Replaced that assertion argument with an explicit
+comparison; no gameplay conversion or warning suppression was introduced.
 
 ## Coverage limits
 

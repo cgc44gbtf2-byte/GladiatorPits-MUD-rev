@@ -98,13 +98,16 @@ Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
 in-game staff integration tests use Python 3's standard library:
 
 ```sh
-make check       # 458 game + 120 account checks, gameplay and in-game staff TCP suites
+make check       # 665 game + 120 account checks, gameplay and in-game staff TCP suites
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```
 
 The [GitHub CI guide](CI.md) documents automatic GCC/Clang optimized and
 ASan/UBSan checks, local reproduction, permissions and hosted-run results.
+The [combat/security audit](COMBAT_SECURITY_AUDIT.md) records disconnect safety,
+secure D10 rolls, shutdown ownership cleanup and monotonic combat timing,
+including regressions, compatibility boundaries and verification.
 
 Tests use disposable directories and an ephemeral TCP port, not live player records. GCC 15 and Clang 20 have been verified; use `make clean` before switching compiler or build flags.
 

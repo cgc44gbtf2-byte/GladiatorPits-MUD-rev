@@ -135,7 +135,7 @@ static void TestCombatPendingDisconnect(void)
       Check(CharacterInspect("Defender",&saved)==1&&saved.damage==0,
          "pending disconnect never deletes the opponent's persisted record");
       if(variant>=4)
-         Check(departing->bWriteFailed,"attack-message failure is detected before committing damage");
+         Check(departing->bWriteFailed!=FALSE,"attack-message failure is detected before committing damage");
       CloseConnection(departing);
       Check(pstFirstConn==remaining&&remaining->pstBody->iWin==1&&
          remaining->pstBody->iKill==0&&remaining->pstBody->iRoom==0&&
@@ -317,6 +317,28 @@ static void TestShutdownStorageCleanup(void)
    }
    ReleaseConnections();
    Check(pstFirstConn==NULL,"shutdown storage cleanup is idempotent");
+}
+
+static void TestCombatHeartbeat(void)
+{
+   time_t before=AuthClock();
+   time_t combat=CombatClock();
+   time_t after=AuthClock();
+   Check(combat>=before&&combat<=after,
+      "combat heartbeat uses the monotonic domain rather than adjustable wall time");
+   Check(!CombatPulseDue(100,100)&&CombatPulseDue(100,101),
+      "combat heartbeat preserves one-second pulse gating");
+   Check(CombatPulseDue(100,1000)&&!CombatPulseDue(1000,1000),
+      "lag coalesces to one pulse instead of replaying missed turns");
+   Check(!CombatPulseDue(100,99)&&!CombatPulseDue(100,0),
+      "clock failure or an unexpected backwards sample cannot create an extra pulse");
+   if(sizeof(time_t)==sizeof(int64_t)&&(time_t)-1<(time_t)0)
+   {
+      Check(!CombatPulseDue((time_t)INT64_MAX,(time_t)INT64_MIN),
+         "signed time boundaries do not overflow the pulse comparison");
+      Check(CombatPulseDue((time_t)INT64_MIN,(time_t)INT64_MAX),
+         "large forward samples need no signed time subtraction");
+   }
 }
 
 static void TestCharacterCreation(void)
@@ -1378,6 +1400,7 @@ int main(void)
    TestCombatRules();
    TestCombatRandomness();
    TestShutdownStorageCleanup();
+   TestCombatHeartbeat();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);

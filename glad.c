@@ -135,6 +135,8 @@ void    ClearChallenge  (conn_t*pstConn);
 static void IncrementProgression(int *counter,const char *name,const char *field);
 static int RollD10(void);
 static void ReleaseConnections(void);
+static time_t CombatClock(void);
+static int CombatPulseDue(time_t last,time_t now);
 
 /******************************************************************************
  Required global variables.
@@ -870,10 +872,10 @@ void GameLoop(int iControl)
          continue; /* Try again if it raised an exception */
 
       /* Update pulse called every second */
-      if((time(0)-tTime)>=1/* second */)
+      if(CombatPulseDue(tTime,CombatClock()))
       {
          Update();
-         tTime=time(0);
+         tTime=CombatClock();
       }
 
       /* Check if iControl is in the sFd descriptor set */
@@ -920,6 +922,16 @@ static void IncrementProgression(int *counter,const char *name,const char *field
    else
       Log("Progression ceiling reached for %s (%s); existing value retained.\n",
          name,field);
+}
+
+static time_t CombatClock(void)
+{
+   return AuthClock();
+}
+
+static int CombatPulseDue(time_t last,time_t now)
+{
+   return now>last;
 }
 
 static int RollD10(void)
