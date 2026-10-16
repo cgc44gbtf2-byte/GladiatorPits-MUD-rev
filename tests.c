@@ -544,6 +544,92 @@ static void TestInGameStaff(void)
    pstFirstConn=NULL;
 }
 
+static void TestAuthenticationReplay(void)
+{
+   account_session owner;
+   conn_t connection=stConnEmpty;
+   int sockets[2],success;
+   char oversized[MAX_BUF];
+   Check(AccountRegister("Nonceowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Nonceowner",ROLE_OWNER),"request isolation owner fixture");
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"request isolation sockets");
+   connection.iSocket=sockets[0];
+   connection.eStatus=CROWD;
+   connection.account=owner;
+   connection.iIp=7000;
+   connection.connection_token=20001;
+   strcpy(connection.account_name,"Nonceowner");
+   pstFirstConn=&connection;
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   SetInput(&connection,"staff role Regtest administrator");
+   SetInput(&connection,"CONFIRM");
+   SetInput(&connection,"regression-test-password-only");
+   Check(auth_jobs[0].state==1,"old staff proof queued");
+   auth_jobs[0].state=2; /* Deterministically pause the worker's completion. */
+   memset(oversized,'A',sizeof(oversized));
+   Check(write(sockets[1],oversized,sizeof(oversized))==(ssize_t)sizeof(oversized)&&
+      GetInput(&connection),"oversized line reaches cancellation path");
+   Check(write(sockets[1],"\n",1)==1&&GetInput(&connection)&&
+      connection.auth_stage==AUTH_IDLE,"overflow cancels the old staff request");
+   SetInput(&connection,"staff role Regtest moderator");
+   SetInput(&connection,"CONFIRM");
+   SetInput(&connection,"regression-test-password-only");
+   Check(auth_jobs[1].state==1,"new staff proof has a separate queue slot");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_PLAYER&&
+      connection.auth_stage==AUTH_WAIT,
+      "cancelled staff proof cannot mutate or cancel a newer action");
+   auth_jobs[1].state=3;
+   auth_jobs[1].ok=1;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_MODERATOR,
+      "only the newer staff proof applies its requested role");
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore replay target role");
+
+   for(success=0;success<=1;success++)
+   {
+      connection.account.id=connection.account.epoch=0;
+      connection.iIp=(uint32_t)(7100+success);
+      connection.iOutLen=0;
+      SetInput(&connection,"login Regtest");
+      SetInput(&connection,"regression-test-password-only");
+      auth_jobs[0].state=2;
+      AccountCancel(&connection);
+      SetInput(&connection,"login Nonceowner");
+      SetInput(&connection,"regression-test-password-only");
+      auth_jobs[0].state=3;
+      auth_jobs[0].ok=success;
+      auth_jobs[0].session=regression_account;
+      AccountPoll();
+      Check(connection.account.id==0&&connection.auth_stage==AUTH_WAIT,
+         "stale successful/failed login cannot affect a newer login");
+      auth_jobs[1].state=3;
+      auth_jobs[1].ok=1;
+      auth_jobs[1].session=owner;
+      AccountPoll();
+      Check(connection.account.id==owner.id&&
+         strcmp(connection.account_name,"Nonceowner")==0,
+         "accepted login identity matches its own account prompt");
+   }
+   {
+      uint64_t saved_token=next_auth_request_token;
+      next_auth_request_token=UINT64_MAX;
+      AccountQueue(&connection,2,"regression-test-password-only");
+      Check(next_auth_request_token==UINT64_MAX&&
+         connection.auth_request_token==0&&connection.auth_stage==AUTH_IDLE&&
+         auth_jobs[0].state==0,"request-token exhaustion fails closed without wrap/reuse");
+      next_auth_request_token=saved_token;
+   }
+   close(sockets[0]);
+   close(sockets[1]);
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -665,6 +751,7 @@ int main(void)
    TestAuthenticationLimits();
    TestSavedInspection();
    TestInGameStaff();
+   TestAuthenticationReplay();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);

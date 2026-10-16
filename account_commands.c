@@ -11,7 +11,7 @@ typedef enum {
 
 typedef struct {
    int state,operation,ok;
-   uint64_t token;
+   uint64_t token,request_token;
    account_session session;
    int64_t staff_target;
    int staff_operation,staff_value;
@@ -25,6 +25,8 @@ static pthread_mutex_t auth_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t auth_ready=PTHREAD_COND_INITIALIZER;
 static int auth_stopping;
 static uint64_t next_connection_token;
+/* Main-thread issued, never reused; zero means there is no pending request. */
+static uint64_t next_auth_request_token;
 static struct {
    uint32_t ip;
    time_t window;
@@ -52,6 +54,7 @@ static void AccountCancel(conn_t *connection)
    sodium_memzero(connection->auth_password,sizeof(connection->auth_password));
    sodium_memzero(connection->auth_old_password,sizeof(connection->auth_old_password));
    connection->auth_stage=AUTH_IDLE;
+   connection->auth_request_token=0;
    connection->auth_deadline=0;
    connection->staff_target=0;
    connection->staff_operation=connection->staff_value=0;
@@ -170,6 +173,13 @@ static void AccountRuntimeStop(void)
 static void AccountQueue(conn_t *connection,int operation,const char *password)
 {
    int i;
+   uint64_t request_token=0;
+   if(next_auth_request_token==UINT64_MAX)
+   {
+      AccountCancel(connection);
+      PutOutput(connection,TO_USER,"Authentication unavailable; contact staff.\n\r");
+      return;
+   }
    if(!AuthRateAllowed(connection->iIp))
    {
       AccountCancel(connection);
@@ -187,6 +197,7 @@ static void AccountQueue(conn_t *connection,int operation,const char *password)
       job->state=1;
       job->operation=operation;
       job->token=connection->connection_token;
+      job->request_token=request_token=++next_auth_request_token;
       job->session=connection->account;
       job->staff_target=connection->staff_target;
       job->staff_operation=connection->staff_operation;
@@ -203,6 +214,7 @@ static void AccountQueue(conn_t *connection,int operation,const char *password)
    else
    {
       connection->auth_stage=AUTH_WAIT;
+      connection->auth_request_token=request_token;
       connection->auth_deadline=AuthClock()+120;
       PutOutput(connection,TO_USER,"Authenticating...\n\r");
    }
@@ -230,7 +242,8 @@ static int AccountPoll(void)
       for(connection=pstFirstConn;connection;connection=connection->pstNext)
          if(connection->connection_token==result.token)
             break;
-      if(connection&&connection->auth_stage==AUTH_WAIT&&!connection->bClosing)
+      if(connection&&connection->auth_stage==AUTH_WAIT&&!connection->bClosing&&
+         result.request_token!=0&&connection->auth_request_token==result.request_token)
       {
          if(result.operation==4)
          {

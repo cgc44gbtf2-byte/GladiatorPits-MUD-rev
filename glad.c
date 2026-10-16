@@ -145,7 +145,7 @@ static struct connection
    uint32_t iIp;
    bool     bWriteFailed,bClosing,bInputTooLong;
    account_session account;
-   uint64_t connection_token;
+   uint64_t connection_token,auth_request_token;
    int auth_stage;
    time_t auth_deadline;
    char account_name[ACCOUNT_NAME_MAX+1];
