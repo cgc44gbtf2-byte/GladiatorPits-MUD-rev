@@ -9,6 +9,9 @@ import sys
 import tempfile
 import time
 
+PASSWORD = "smoke-test-password-only"
+NEW_PASSWORD = "new-smoke-test-password-only"
+
 
 class Client:
     def __init__(self, port):
@@ -37,6 +40,15 @@ class Client:
 
     def close(self):
         self.socket.close()
+
+    def authenticate(self, name, register=False, password=PASSWORD):
+        self.send(f"{'register' if register else 'login'} {name}")
+        self.expect(b"Password: ")
+        self.send(password)
+        if register:
+            self.expect(b"Confirm password: ")
+            self.send(password)
+        self.expect(b"Account authenticated.")
 
 
 def train(client, name):
@@ -70,21 +82,45 @@ def wait_for_port(process, directory):
 
 def main():
     binary = str(Path(sys.argv[1]).resolve())
+    admin = str(Path(sys.argv[2]).resolve())
     clients = []
     environment = dict(os.environ)
-    environment["GLAD_SHUTDOWN_PASSWORD"] = "smoke-test-only"
     with tempfile.TemporaryDirectory(prefix="gladiatorpits-smoke-") as directory:
-        process = subprocess.Popen(
-            [binary], cwd=directory, env=environment,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
+        process = None
+
+        def start():
+            Path(directory, "log.txt").unlink(missing_ok=True)
+            proc = subprocess.Popen(
+                [binary], cwd=directory, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            return proc, wait_for_port(proc, directory)
+
+        def connect(port):
+            client = Client(port)
+            clients.append(client)
+            return client
+
+        def local(*args):
+            result = subprocess.run(
+                [admin, *args], cwd=directory, capture_output=True, timeout=5,
+            )
+            assert result.returncode == 0, "Local account operation failed"
+
+        def stopped(proc):
+            stdout, stderr = proc.communicate(timeout=5)
+            assert proc.returncode == 0, (stdout, stderr)
+            assert not stderr, stderr.decode(errors="replace")
+
         try:
-            port = wait_for_port(process, directory)
-            alice = Client(port)
-            clients.append(alice)
+            process, port = start()
+            alice = connect(port)
+            alice.send("create Alice")
+            alice.expect(b"Permission denied")
+            alice.authenticate("Alice", register=True)
             train(alice, "Alice")
-            bob = Client(port)
-            clients.append(bob)
+            bob = connect(port)
+            bob.authenticate("Bob", register=True)
             train(bob, "Bob")
 
             alice.send("say smoke-room-message")
@@ -104,23 +140,103 @@ def main():
             alice.send("quit")
             alice.expect_closed()
 
-            alice = Client(port)
-            clients.append(alice)
+            bob = connect(port)
+            bob.authenticate("Bob")
+            bob.send("create Alice")
+            bob.expect(b"Character unavailable")
+            legacy = Path(directory, "Legacyhero")
+            original = Path(directory, "Alice").read_bytes()
+            legacy_bytes = b"Legacyhero".ljust(16, b"\0") + original[16:]
+            legacy.write_bytes(legacy_bytes)
+            bob.send("create Legacyhero")
+            bob.expect(b"Existing unlinked saves require local staff approval")
+            local("link", "Alice", "Legacyhero")
+            assert legacy.read_bytes() == legacy_bytes
+            bob.send("shutdown")
+            bob.expect(b"Permission denied")
+
+            alice = connect(port)
+            alice.authenticate("Alice")
             alice.send("create Alice", "score")
             score = alice.expect(b"Speed:7")
             assert b"Str:9 Dex:9 Sta:9 Siz:2 Wit:1" in score, score
             assert re.search(rb"Win-Loss-Kill:\s*1\s*-\s*0\s*-\s*0", score), score
-            alice.send("shutdown smoke-test-only")
+            local("role", "Alice", "administrator")
+            alice.send("shutdown")
             alice.expect(b"Shutdown by Alice")
-            stdout, stderr = process.communicate(timeout=5)
-            assert process.returncode == 0, (stdout, stderr)
-            assert not stderr, stderr.decode(errors="replace")
-            print("TCP smoke passed: creation, training, room chat, PvP surrender, "
-                  "reconnect/save, and shutdown.")
+            stopped(process)
+
+            # Restart: account credentials, role, ownership and gameplay persist.
+            process, port = start()
+            alice = connect(port)
+            alice.authenticate("Alice")
+            alice.send("create Alice")
+            alice.expect(b"You step from the crowd.")
+            other = connect(port)
+            other.authenticate("Alice")
+            alice.send("password")
+            alice.expect(b"Current password: ")
+            alice.send(PASSWORD)
+            alice.expect(b"New password: ")
+            alice.send(NEW_PASSWORD)
+            alice.expect(b"Confirm password: ")
+            alice.send(NEW_PASSWORD)
+            alice.expect(b"Password changed.")
+            other.expect_closed()
+            alice.send("score")
+            alice.expect(b"Speed:7")
+            login = connect(port)
+            login.send("login Alice")
+            login.expect(b"Password: ")
+            login.send(PASSWORD)
+            login.expect(b"Authentication failed")
+            login.authenticate("Alice", password=NEW_PASSWORD)
+            login.send("account")
+            login.expect(b"Role: administrator")
+            limited = connect(port)
+            limited.send("login Alice")
+            limited.expect(b"Password: ")
+            limited.send(NEW_PASSWORD)
+            limited.expect(b"Authentication limit reached")
+            local("role", "Alice", "player")
+            alice.send("shutdown")
+            alice.expect(b"Permission denied")
+            local("role", "Alice", "administrator")
+            alice.send("shutdown")
+            alice.expect(b"Shutdown by Alice")
+            stopped(process)
+
+            # A detached authentication result cannot be applied to a new socket.
+            process, port = start()
+            ghost = connect(port)
+            ghost.send("login Alice")
+            ghost.expect(b"Password: ")
+            ghost.send(NEW_PASSWORD)
+            ghost.close()
+            bob = connect(port)
+            bob.authenticate("Bob")
+            bob.send("account", "shutdown")
+            bob.expect(b"Role: player")
+            bob.expect(b"Permission denied")
+            alice = connect(port)
+            alice.authenticate("Alice", password=NEW_PASSWORD)
+            alice.send("shutdown")
+            alice.expect(b"Shutdown by Someone in the crowd")
+            stopped(process)
+
+            for path in Path(directory).iterdir():
+                if path.name.startswith("accounts.sqlite3") or path.name == "log.txt":
+                    content = path.read_bytes()
+                    assert PASSWORD.encode() not in content
+                    assert NEW_PASSWORD.encode() not in content
+            assert Path(directory, "accounts.sqlite3").stat().st_mode & 0o077 == 0
+            print("TCP smoke passed: accounts, ownership/legacy protection, gameplay, "
+                  "restart, password/session revocation, roles, rate limits, "
+                  "disconnected auth jobs, and staff shutdown.")
         finally:
             for client in clients:
                 client.close()
-            if process.poll() is None:
+            if process is not None and process.poll() is None:
                 process.terminate()
                 try:
                     process.wait(timeout=5)

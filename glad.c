@@ -37,6 +37,11 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/stat.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <sodium.h>
+#include "accounts.h"
 
 /******************************************************************************
  Required literals.
@@ -90,6 +95,7 @@ typedef struct
    char       *szCommand;
    void      (*pfFunction)(conn_t*,char*);
    status_t eType;
+   account_permission permission;
 } cmd_table_t;
 
 /******************************************************************************
@@ -147,6 +153,13 @@ static struct connection
    int      iSocket,iInLen,iOutLen;
    uint32_t iIp;
    bool     bWriteFailed,bClosing,bInputTooLong;
+   account_session account;
+   uint64_t connection_token;
+   int auth_stage;
+   time_t auth_deadline;
+   char account_name[ACCOUNT_NAME_MAX+1];
+   char auth_password[ACCOUNT_PASSWORD_MAX+1];
+   char auth_old_password[ACCOUNT_PASSWORD_MAX+1];
    conn_t  *pstPrev,*pstNext;
 } stConnEmpty;
 
@@ -161,30 +174,35 @@ extern const cmd_table_t kstCmdTable[];
  ******************************************************************************/
 
 /* Include the source code file for the commands */
+#include "account_commands.c"
 #include "commands.c"
 
 /* Create the command table */
 const cmd_table_t kstCmdTable[] =
 {
-   {"quit",      CmdQuit,      ALL},
-   {"who",       CmdWho,       ALL},
-   {"commands",  CmdCommands,  ALL},
-   {"shutdown",  CmdShutdown,  ALL&~CROWD},
-   {"say",       CmdSay,       ALL},
-   {"chat",      CmdChat,      ALL&~CROWD},
-   {"emote",     CmdEmote,     ALL},
-   {"create",    CmdCreate,    CROWD},
-   {"score",     CmdScore,     ALL&~CROWD},
-   {"train",     CmdTrain,     CITIZEN},
-   {"str",       CmdStr,       TRAINING},
-   {"dex",       CmdDex,       TRAINING},
-   {"sta",       CmdSta,       TRAINING},
-   {"siz",       CmdSiz,       TRAINING},
-   {"wit",       CmdWit,       TRAINING},
-   {"leave",     CmdLeave,     TRAINING},
-   {"challenge", CmdChallenge, GLADIATOR|CHALLENGER},
-   {"accept",    CmdAccept,    GLADIATOR},
-   {NULL,NULL,0}
+   {"quit",      CmdQuit,      ALL,PERM_PUBLIC},
+   {"who",       CmdWho,       ALL,PERM_PUBLIC},
+   {"commands",  CmdCommands,  ALL,PERM_PUBLIC},
+   {"register",  CmdRegister,  ALL,PERM_PUBLIC},
+   {"login",     CmdLogin,     ALL,PERM_PUBLIC},
+   {"account",   CmdAccount,   ALL,PERM_PUBLIC},
+   {"password",  CmdPassword,  ALL,PERM_PLAY},
+   {"shutdown",  CmdShutdown,  ALL,PERM_SHUTDOWN},
+   {"say",       CmdSay,       ALL,PERM_PUBLIC},
+   {"chat",      CmdChat,      ALL&~CROWD,PERM_PLAY},
+   {"emote",     CmdEmote,     ALL,PERM_PUBLIC},
+   {"create",    CmdCreate,    CROWD,PERM_PLAY},
+   {"score",     CmdScore,     ALL&~CROWD,PERM_PLAY},
+   {"train",     CmdTrain,     CITIZEN,PERM_PLAY},
+   {"str",       CmdStr,       TRAINING,PERM_PLAY},
+   {"dex",       CmdDex,       TRAINING,PERM_PLAY},
+   {"sta",       CmdSta,       TRAINING,PERM_PLAY},
+   {"siz",       CmdSiz,       TRAINING,PERM_PLAY},
+   {"wit",       CmdWit,       TRAINING,PERM_PLAY},
+   {"leave",     CmdLeave,     TRAINING,PERM_PLAY},
+   {"challenge", CmdChallenge, GLADIATOR|CHALLENGER,PERM_PLAY},
+   {"accept",    CmdAccept,    GLADIATOR,PERM_PLAY},
+   {NULL,NULL,0,PERM_PUBLIC}
 };
 
 /******************************************************************************
@@ -214,11 +232,20 @@ int main(void)
 
    /* Seed the dice */
    srand((unsigned int)time(0));
+   umask(0077);
+   if(!AccountRuntimeStart())
+   {
+      Log("Cannot initialize private account storage/authentication worker.\n");
+      return EXIT_FAILURE;
+   }
 
    /* Initialise the control socket */
    iControl=InitSocket();
    if(iControl<0)
+   {
+      AccountRuntimeStop();
       return EXIT_FAILURE;
+   }
 
    /* Only report startup after the listener has been created. */
    if(getsockname(iControl,(struct sockaddr*)&stAddress,&iAddressSize)==0)
@@ -229,6 +256,7 @@ int main(void)
 
    /* Close the main socket */
    close(iControl);
+   AccountRuntimeStop();
 
    /* Exit the program */
    return 0;
@@ -253,7 +281,14 @@ int InitSocket(void)
 
    /* Initialise the control socket data */
    stSa.sin_family=AF_INET;
-   stSa.sin_addr.s_addr=INADDR_ANY;
+   {
+      const char *address=getenv("GLAD_BIND_ADDRESS");
+      if(inet_pton(AF_INET,address?address:"127.0.0.1",&stSa.sin_addr)!=1)
+      {
+         Log("Invalid GLAD_BIND_ADDRESS.\n");
+         return -1;
+      }
+   }
    stSa.sin_port=htons(PORT);
    stLd.l_onoff=stLd.l_linger=0;
 
@@ -347,11 +382,19 @@ bool GetInput(conn_t*pstConn)
       {
          pstConn->a_chInBuf[pstConn->iInLen]='\0';
          if(pstConn->bInputTooLong)
+         {
+            if(pstConn->auth_stage!=AUTH_IDLE)
+               AccountCancel(pstConn);
             PutOutput(pstConn,TO_USER,"Input line too long.\n\r");
+         }
          else
             ParseInput(pstConn);
+         sodium_memzero(pstConn->a_chInBuf,sizeof(pstConn->a_chInBuf));
          if(pstConn->bClosing)
+         {
+            sodium_memzero(a_chBuf,sizeof(a_chBuf));
             return FALSE;
+         }
          if(pstConn->iInLen)
             PutPrompt(pstConn);
          pstConn->iInLen=0;
@@ -366,6 +409,7 @@ bool GetInput(conn_t*pstConn)
       }
    }
 
+   sodium_memzero(a_chBuf,sizeof(a_chBuf));
    /* Input was successfully read from the connection */
    return TRUE;
 }
@@ -386,6 +430,16 @@ void ParseInput(conn_t*pstConn)
 {
    char *szTxt=pstConn->a_chInBuf;
    int  i;
+   if(pstConn->auth_stage!=AUTH_IDLE)
+   {
+      AccountInput(pstConn,pstConn->a_chInBuf);
+      return;
+   }
+   if(pstConn->account.id&&AccountSessionRole(pstConn->account)==ROLE_NONE)
+   {
+      pstConn->bClosing=TRUE;
+      return;
+   }
 
    /* Loop through the connection's input buffer */
    while(*szTxt)
@@ -407,6 +461,11 @@ void ParseInput(conn_t*pstConn)
       {
          if((pstConn->eStatus&kstCmdTable[i].eType))
          {
+            if(!ConnectionCan(pstConn,kstCmdTable[i].permission))
+            {
+               PutOutput(pstConn,TO_USER,"Permission denied. Authenticate or contact staff.\n\r");
+               return;
+            }
             /* The command was found, so perform the appropriate function */
             (*kstCmdTable[i].pfFunction)(pstConn,szTxt);
             return; /* No point carrying on */
@@ -416,7 +475,7 @@ void ParseInput(conn_t*pstConn)
 
    /* Inform the user that there is no such command (unless they just hit enter) */
    if(pstConn->a_chInBuf[0])
-      PutOutput(pstConn,TO_USER,"Unrecognised command '%s'.  Type 'commands' to list available options.\n\r",pstConn->a_chInBuf);
+      PutOutput(pstConn,TO_USER,"Unrecognised command. Type 'commands' to list available options.\n\r");
    else /* If they just hit enter, send "nothing" (this is required for screen formatting) */
       PutOutput(pstConn,TO_USER,"");
 }
@@ -556,6 +615,8 @@ int FlushOutput(conn_t*pstConn)
  */
 void PutPrompt(conn_t*pstConn)
 {
+   if(pstConn->auth_stage!=AUTH_IDLE)
+      return;
    /* Call PutOutput, passing in the prompt text */
    PutOutput(pstConn,TO_USER,"> "); /* Default prompt is "> " */
 }
@@ -627,6 +688,7 @@ bool NewConnection(int iSocket)
 
    /* Initialise the new connection structure */
    pstConn->iSocket=iSocket;
+   pstConn->connection_token=++next_connection_token;
 
    /* Calculate and store the ip address of the new connection */
    pstConn->iIp=ntohl(stSa.sin_addr.s_addr);
@@ -636,6 +698,8 @@ bool NewConnection(int iSocket)
 
    /* Greet the new connection */
    PutOutput(pstConn,TO_USER,"Welcome to the Gladiator Pits!\n\r");
+   PutOutput(pstConn,TO_USER,"Use register <account> or login <account> before create <character>.\n\r"
+      "Password traffic requires a TLS gateway or secure tunnel; TCP alone is not encrypted.\n\r");
 
    /* New connection was successfully created, so return TRUE */
    return TRUE;
@@ -706,6 +770,9 @@ void CloseConnection(conn_t*pstConn)
 
    /* Close and free the socket */
    CloseSocket(pstConn->iSocket);
+   sodium_memzero(pstConn->auth_password,sizeof(pstConn->auth_password));
+   sodium_memzero(pstConn->auth_old_password,sizeof(pstConn->auth_old_password));
+   sodium_memzero(pstConn->a_chInBuf,sizeof(pstConn->a_chInBuf));
    free(pstConn);
 }
 
@@ -739,6 +806,7 @@ void GameLoop(int iControl)
 
    do /* until a shutdown occurs */
    {
+      int auth_busy=AccountPoll();
       /* Clear the socket flags */
       memcpy(&sFd,&a_sFd,sizeof(sFd));
       FD_ZERO(&sWriteFd);
@@ -752,8 +820,8 @@ void GameLoop(int iControl)
       }
 
       /* Set to 1 second */
-      stTv.tv_sec=1;
-      stTv.tv_usec=0;
+      stTv.tv_sec=auth_busy?0:1;
+      stTv.tv_usec=auth_busy?100000:0;
 
       /* Sleep until a descriptor tries to do something */
       if(select(iFdMax,&sFd,&sWriteFd,(fd_set*)0,&stTv)<0)

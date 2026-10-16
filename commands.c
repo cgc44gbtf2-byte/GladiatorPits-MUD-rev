@@ -22,21 +22,15 @@ CMD(Quit)
 
 CMD(Shutdown)
 {
-   const char *szPassword=getenv("GLAD_SHUTDOWN_PASSWORD");
-
-   /* If there is no input with the command, send a message and return */
-   NO_INPUT("Syntax: shutdown <password>\n\r");
-
-   if(!szPassword||!szPassword[0])
-      PutOutput(pstConn,TO_USER,"Remote shutdown is not configured.\n\r");
-   else if(strcmp(szTxt,szPassword))
-      PutOutput(pstConn,TO_USER,"Incorrect password.\n\r");
+   (void)szTxt;
+   if(!ConnectionCan(pstConn,PERM_SHUTDOWN))
+      PutOutput(pstConn,TO_USER,"Permission denied.\n\r");
    else
    {
       /* Shutdown message */
       PutOutput(pstConn,TO_ALL,"[Shutdown by %s]\n\r",
-         pstConn->pstBody->a_chName);
-      Log("Shutdown by %s.\n\r",pstConn->pstBody->a_chName);
+         NAME(pstConn));
+      Log("Shutdown by account %s.\n",pstConn->account_name);
 
       /* Toggle the flag used within the GameLoop function */
       bShutdown=TRUE;
@@ -49,6 +43,8 @@ CMD(Create)
    body_t *pstBody;
    FILE *pPlayerFile;
    bool bValid;
+   struct stat stInfo;
+   int iExisting;
 
    /* If there is no input with the command, send a message and return */
    NO_INPUT("Syntax: create <name>\n\r");
@@ -68,6 +64,27 @@ CMD(Create)
       PutOutput(pstConn,TO_USER,"That name is in use.\n\r");
       return;
    }
+   if(!ConnectionCan(pstConn,PERM_PLAY))
+   {
+      PutOutput(pstConn,TO_USER,"Authenticate before loading a character.\n\r");
+      return;
+   }
+   for(i=0;szTxt[i];i++)
+      szTxt[i]=(char)tolower((unsigned char)szTxt[i]);
+   szTxt[0]=(char)toupper((unsigned char)szTxt[0]);
+   iExisting=lstat(szTxt,&stInfo)==0;
+   if((!iExisting&&errno!=ENOENT)||(iExisting&&!S_ISREG(stInfo.st_mode)))
+   {
+      PutOutput(pstConn,TO_USER,"Unable to inspect character file.\n\r");
+      return;
+   }
+   if(!AccountCharacter(pstConn->account,szTxt,iExisting))
+   {
+      PutOutput(pstConn,TO_USER,"Character unavailable or not linked to your account. "
+         "Existing unlinked saves require local staff approval.\n\r");
+      return;
+   }
+   i=0;
    if(!(pstBody=(body_t*)malloc(sizeof(body_t))))
    {
       Log("BUG: Cannot malloc.\n");
@@ -188,7 +205,8 @@ CMD(Commands)
    for(i=0;kstCmdTable[i].szCommand!=NULL;i++)
    {
       /* Display the command if the connection has access to it */
-      if((pstConn->eStatus&kstCmdTable[i].eType))
+      if((pstConn->eStatus&kstCmdTable[i].eType)&&
+         ConnectionCan(pstConn,kstCmdTable[i].permission))
          PutOutput(pstConn,TO_USER,"%-20s%s",kstCmdTable[i].szCommand,
             (!(++iCount%4))?"\n\r":"");
    }

@@ -1,6 +1,13 @@
 /glad
 /glad-tests
 /glad-smoke
+/glad-admin
+/account-tests
+/.account-test-run/
+/accounts.sqlite3
+/accounts.sqlite3-wal
+/accounts.sqlite3-shm
+/accounts.sqlite3-journal
 /.test-run/
 /log.txt
 __pycache__/

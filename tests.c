@@ -11,6 +11,7 @@ static conn_t test_conn_two;
 static body_t test_body_one;
 static body_t test_body_two;
 static int tests_run;
+static account_session regression_account;
 
 static void Check(int condition, const char *message)
 {
@@ -33,10 +34,12 @@ static void ResetWorld(void)
    strcpy(test_body_two.a_chName, "Defender");
    test_conn_one.pstBody = &test_body_one;
    test_conn_one.eStatus = GLADIATOR;
+   test_conn_one.account = regression_account;
    test_conn_one.pstNext = &test_conn_two;
    test_conn_two.pstPrev = &test_conn_one;
    test_conn_two.pstBody = &test_body_two;
    test_conn_two.eStatus = GLADIATOR;
+   test_conn_two.account = regression_account;
    pstFirstConn = &test_conn_one;
    FD_ZERO(&a_sFd);
 }
@@ -65,6 +68,7 @@ static void TestCharacterCreation(void)
 
    memset(&stConn, 0, sizeof(stConn));
    stConn.eStatus = CROWD;
+   stConn.account = regression_account;
    pstFirstConn = &stConn;
    SetInput(&stConn, "create ArenaTest");
 
@@ -115,6 +119,8 @@ static void TestTrainingAndSave(void)
 
    memset(&stReload,0,sizeof(stReload));
    stReload.eStatus=CROWD;
+   stReload.account=regression_account;
+   Check(AccountLinkLegacy("Regtest","Savedhero"),"legacy fixture is explicitly linked");
    pstFirstConn=&stReload;
    SetInput(&stReload,"create Savedhero");
    Check(stReload.pstBody!=NULL&&stReload.eStatus==GLADIATOR,
@@ -289,6 +295,7 @@ static void TestInvalidPlayerInput(void)
 
    memset(&stConn,0,sizeof(stConn));
    stConn.eStatus=CROWD;
+   stConn.account=regression_account;
    pstFirstConn=&stConn;
    SetInput(&stConn,"create Bad1");
    Check(stConn.pstBody==NULL&&stConn.eStatus==CROWD,
@@ -298,6 +305,7 @@ static void TestInvalidPlayerInput(void)
    Check(pDamaged!=NULL, "damaged-save fixture is created");
    Check(fwrite("bad",3,1,pDamaged)==1, "damaged-save fixture is written");
    fclose(pDamaged);
+   Check(AccountLinkLegacy("Regtest","Corrupt"),"corrupt fixture ownership linked for validation test");
    SetInput(&stConn,"create Corrupt");
    Check(stConn.pstBody==NULL&&stConn.eStatus==CROWD,
       "damaged player records are rejected safely");
@@ -314,17 +322,95 @@ static void TestShutdownConfiguration(void)
 {
    ResetWorld();
    bShutdown=FALSE;
-   unsetenv("GLAD_SHUTDOWN_PASSWORD");
+   setenv("GLAD_SHUTDOWN_PASSWORD","unit-test-only",1);
    SetInput(&test_conn_one,"shutdown unused");
-   Check(!bShutdown, "remote shutdown fails closed without configuration");
-   Check(setenv("GLAD_SHUTDOWN_PASSWORD","unit-test-only",1)==0,
-      "test-only shutdown configuration is installed");
-   SetInput(&test_conn_one,"shutdown incorrect");
-   Check(!bShutdown, "incorrect shutdown credential is rejected");
-   SetInput(&test_conn_one,"shutdown unit-test-only");
-   Check(bShutdown==TRUE, "configured shutdown command remains available");
+   Check(!bShutdown, "regular player cannot shut down even with old configuration");
+   Check(AccountSetRole("Regtest",ROLE_BUILDER),"builder fixture role");
+   SetInput(&test_conn_one,"shutdown");
+   Check(!bShutdown,"builder cannot shut down");
+   Check(AccountSetRole("Regtest",ROLE_MODERATOR),"moderator fixture role");
+   SetInput(&test_conn_one,"shutdown");
+   Check(!bShutdown,"moderator cannot shut down");
+   Check(AccountSetRole("Regtest",ROLE_ADMINISTRATOR),"administrator fixture role");
+   SetInput(&test_conn_one,"shutdown");
+   Check(bShutdown==TRUE,"authorized staff shutdown remains available");
+   bShutdown=FALSE;
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"staff role revoked");
+   SetInput(&test_conn_one,"shutdown");
+   Check(!bShutdown,"role revocation takes effect without reconnect");
    unsetenv("GLAD_SHUTDOWN_PASSWORD");
    bShutdown=FALSE;
+}
+
+static void TestAccountCommandGates(void)
+{
+   conn_t connection;
+   int sockets[2];
+   const char *input="register Prompttest\nprompt-test-password-only\n";
+   memset(&connection,0,sizeof(connection));
+   connection.eStatus=CROWD;
+   pstFirstConn=&connection;
+   SetInput(&connection,"create Unowned");
+   Check(connection.pstBody==NULL,"unauthenticated creation denied centrally");
+   Check(OutputContains(&connection,"Permission denied"),"permission denial is explicit");
+   connection.account=regression_account;
+   connection.iOutLen=0;
+   SetInput(&connection,"commands");
+   Check(!OutputContains(&connection,"shutdown"),"staff commands hidden from players");
+   memset(&connection.account,0,sizeof(connection.account));
+   connection.iOutLen=0;
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"password prompt socket fixture");
+   connection.iSocket=sockets[0];
+   Check(write(sockets[1],input,strlen(input))==(ssize_t)strlen(input),
+      "password prompt input fixture");
+   Check(GetInput(&connection)==TRUE,"password prompt handles batched input");
+   Check(connection.auth_stage==AUTH_REGISTER_CONFIRM,"registration requests confirmation");
+   Check(connection.a_chInBuf[0]=='\0',"consumed password input is wiped");
+   AccountCancel(&connection);
+   SetInput(&connection,"prompt-test-password-only");
+   Check(!OutputContains(&connection,"prompt-test-password-only"),
+      "password never echoed, even when pasted outside a prompt");
+   Check(connection.auth_password[0]=='\0'&&connection.auth_old_password[0]=='\0',
+      "cancelled password buffers are wiped");
+   close(sockets[0]);
+   close(sockets[1]);
+   pstFirstConn=NULL;
+}
+
+static void TestAuthenticationLimits(void)
+{
+   conn_t connections[AUTH_JOB_COUNT+1];
+   int i;
+   memset(connections,0,sizeof(connections));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   auth_global_window=AuthClock();
+   for(i=0;i<5;i++)
+      Check(AuthRateAllowed(1234),"per-IP authentication budget");
+   Check(!AuthRateAllowed(1234),"reconnecting does not bypass per-IP limit");
+   for(i=0;i<=AUTH_JOB_COUNT;i++)
+   {
+      connections[i].iIp=(uint32_t)(2000+i);
+      connections[i].connection_token=(uint64_t)(i+1);
+      strcpy(connections[i].account_name,"Queuefixture");
+      pstFirstConn=&connections[i];
+      AccountQueue(&connections[i],2,"queued-test-password-only");
+   }
+   Check(connections[AUTH_JOB_COUNT-1].auth_stage==AUTH_WAIT,
+      "bounded queue accepts available slots");
+   Check(connections[AUTH_JOB_COUNT].auth_stage==AUTH_IDLE&&
+      OutputContains(&connections[AUTH_JOB_COUNT],"busy"),
+      "full authentication queue fails safely without blocking");
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   memset(&connections[0],0,sizeof(connections[0]));
+   connections[0].auth_stage=AUTH_REGISTER_CONFIRM;
+   connections[0].auth_deadline=AuthClock()-1;
+   strcpy(connections[0].auth_password,"expired-test-password-only");
+   pstFirstConn=&connections[0];
+   AccountPoll();
+   Check(connections[0].bClosing&&connections[0].auth_password[0]=='\0',
+      "expired authentication wipes credentials and closes session");
+   pstFirstConn=NULL;
 }
 
 static void TestReplacedChallenges(void)
@@ -338,6 +424,7 @@ static void TestReplacedChallenges(void)
    strcpy(stThirdBody.a_chName,"Third");
    stThird.pstBody=&stThirdBody;
    stThird.eStatus=GLADIATOR;
+   stThird.account=regression_account;
    stThird.pstPrev=&test_conn_two;
    test_conn_two.pstNext=&stThird;
 
@@ -428,6 +515,10 @@ static void TestAllTrainingCommands(void)
 int main(void)
 {
    signal(SIGPIPE,SIG_IGN);
+   unlink("regression-accounts.sqlite3");
+   Check(AccountsOpen("regression-accounts.sqlite3"),"regression account database opens");
+   Check(AccountRegister("Regtest","regression-test-password-only",&regression_account),
+      "gameplay fixtures have an authenticated account");
    TestCharacterCreation();
    TestTrainingAndSave();
    TestChallengeAcceptAndCombat();
@@ -439,6 +530,10 @@ int main(void)
    TestReplacedChallenges();
    TestCommunicationAndPermissions();
    TestAllTrainingCommands();
+   TestAccountCommandGates();
+   TestAuthenticationLimits();
+   AccountsClose();
+   unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
    return EXIT_SUCCESS;
 }
