@@ -2,6 +2,8 @@
  * Small regression tests for the existing Gladiator Pits rules.
  * Run in an isolated directory because the game stores player files there.
  */
+static int RegressionD10(void);
+#define D10 RegressionD10()
 #define main glad_server_main
 #include "glad.c"
 #undef main
@@ -14,6 +16,18 @@ static body_t test_body_one;
 static body_t test_body_two;
 static int tests_run;
 static account_session regression_account;
+static int fixed_d10,combat_rolls;
+static int OutputContains(conn_t *pstConn,const char *szText);
+
+static int RegressionD10(void)
+{
+   if(fixed_d10)
+   {
+      combat_rolls++;
+      return fixed_d10;
+   }
+   return RollD10();
+}
 
 static void Check(int condition, const char *message)
 {
@@ -134,6 +148,118 @@ static void TestCombatPendingDisconnect(void)
       unlink("Attacker");
       unlink("Defender");
    }
+}
+
+static void FinishHeapCombat(void)
+{
+   while(pstFirstConn)
+      CloseConnection(pstFirstConn);
+   unlink("Attacker");
+   unlink("Defender");
+   fixed_d10=0;
+}
+
+static void TestCombatRules(void)
+{
+   static const struct {
+      int roll,defender_dexterity,attacker_size,damage;
+      const char *message;
+   } cases[]={
+      {1,2,1,0,"You miss"}, {1,1,1,2,"You punch"},
+      {5,1,1,2,"You punch"}, {6,1,1,4,"You kick"},
+      {10,1,1,4,"You kick"}, {1,1,2,2,"You punch"}
+   };
+   size_t c;
+   int pulse,reverse;
+   for(c=0;c<sizeof(cases)/sizeof(cases[0]);c++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      first->pstBody->iStats[SIZ]=cases[c].attacker_size;
+      second->pstBody->iStats[DEX]=cases[c].defender_dexterity;
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      first->iOutLen=second->iOutLen=0;
+      fixed_d10=cases[c].roll;
+      combat_rolls=0;
+      first->pstBody->iSpeed=SPEED(first->pstBody)-1;
+      second->pstBody->iSpeed=-3;
+      Update();
+      Check(second->pstBody&&second->pstBody->iDam==cases[c].damage&&
+         combat_rolls==3&&OutputContains(first,cases[c].message),
+         "miss/punch/kick boundaries and odd half-damage rounding retain legacy rules");
+      Check(first->pstBody->iSpeed==-3&&first->pstBody->iWin==0&&
+         first->pstBody->iKill==0,"nonlethal attacks retain recovery and progression");
+      FinishHeapCombat();
+   }
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      fixed_d10=1;
+      combat_rolls=0;
+      for(pulse=0;pulse<8;pulse++)
+         Update();
+      Check(combat_rolls==0&&first->pstBody->iSpeed==8,
+         "speed-nine gladiators wait eight complete initial pulses");
+      Update();
+      Check(combat_rolls==6&&first->pstBody->iSpeed==-3&&
+         first->pstBody->iDam==2&&second->pstBody->iDam==2,
+         "both live opponents attack on the ninth pulse");
+      for(pulse=0;pulse<11;pulse++)
+         Update();
+      Check(combat_rolls==6,"three-pulse recovery is preserved before the next attack");
+      Update();
+      Check(combat_rolls==12&&first->pstBody->iDam==4&&second->pstBody->iDam==4,
+         "next attacks follow the original speed-plus-three interval");
+      FinishHeapCombat();
+   }
+   for(reverse=0;reverse<2;reverse++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      conn_t *attacker=reverse?second:first,*victim=reverse?first:second;
+      saved_character saved;
+      char victim_name[16];
+      strcpy(victim_name,victim->pstBody->a_chName);
+      SetInput(first,"challenge Defender");
+      SetInput(second,"accept");
+      Save(victim->pstBody);
+      fixed_d10=10;
+      victim->pstBody->iDam=HEALTH(victim->pstBody)-DAMAGE(attacker->pstBody);
+      attacker->pstBody->iSpeed=SPEED(attacker->pstBody)-1;
+      victim->pstBody->iSpeed=-3;
+      Update();
+      Check(victim->pstBody&&victim->pstBody->iDam==HEALTH(victim->pstBody)&&
+         victim->eStatus==FIGHTING&&attacker->pstBody->iKill==0&&access(victim_name,F_OK)==0,
+         "damage exactly equal to health remains alive under the original strict death threshold");
+      attacker->pstBody->iSpeed=SPEED(attacker->pstBody)-1;
+      Update();
+      Check(victim->pstBody==NULL&&victim->eStatus==CROWD&&
+         attacker->pstBody->iWin==1&&attacker->pstBody->iKill==1&&
+         attacker->pstBody->pstOpponent==NULL&&attacker->pstBody->iRoom==0&&
+         access(victim_name,F_OK)!=0&&errno==ENOENT,
+         "the next lethal hit frees only the defeated body and awards one persisted victory");
+      Check(CharacterInspect(attacker->pstBody->a_chName,&saved)==1&&saved.wins==1&&saved.kills==1,
+         "the victory counters are persisted in a valid historical-layout record");
+      FinishHeapCombat();
+   }
+}
+
+static void TestCombatRandomness(void)
+{
+   int first[64],second[64];
+   size_t i;
+   srand(12345);
+   for(i=0;i<64;i++)
+      first[i]=RollD10();
+   srand(12345);
+   for(i=0;i<64;i++)
+   {
+      second[i]=RollD10();
+      Check(first[i]>=1&&first[i]<=10&&second[i]>=1&&second[i]<=10,
+         "production combat dice remain in the inclusive D10 range");
+   }
+   Check(memcmp(first,second,sizeof(first))!=0,
+      "resetting the public libc seed cannot replay the production combat dice stream");
 }
 
 static void TestCharacterCreation(void)
@@ -1192,6 +1318,8 @@ int main(void)
    TestExpiredAuthenticationInput();
    TestArenaAllocationLimits();
    TestCombatPendingDisconnect();
+   TestCombatRules();
+   TestCombatRandomness();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);

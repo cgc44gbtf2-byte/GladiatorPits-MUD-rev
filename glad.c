@@ -75,7 +75,9 @@
 #define SPEED(p)   (10-(((p->iStats[WIT]*2)+p->iStats[DEX])/3))
 #define ROOM(p)    (p->pstBody?p->pstBody->iRoom:0)
 #define NAME(p)    (p->pstBody?p->pstBody->a_chName:"Someone in the crowd")
-#define D10        (1+(int)(10.0*rand()/(RAND_MAX+1.0)))
+#ifndef D10
+#define D10        RollD10()
+#endif
 
 /******************************************************************************
  Required types.
@@ -131,6 +133,7 @@ conn_t *FindPerson      (char*szTxt);
 void    Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
 static void IncrementProgression(int *counter,const char *name,const char *field);
+static int RollD10(void);
 
 /******************************************************************************
  Required global variables.
@@ -232,8 +235,7 @@ int main(void)
    /* A disconnected client must not terminate the whole server on write. */
    signal(SIGPIPE,SIG_IGN);
 
-   /* Seed the dice */
-   srand((unsigned int)time(0));
+   /* Account startup initializes libsodium, including secure combat dice. */
    umask(0077);
    if(!AccountRuntimeStart())
    {
@@ -894,6 +896,11 @@ static void IncrementProgression(int *counter,const char *name,const char *field
    else
       Log("Progression ceiling reached for %s (%s); existing value retained.\n",
          name,field);
+}
+
+static int RollD10(void)
+{
+   return 1+(int)randombytes_uniform(10U);
 }
 
 static int CombatPendingDisconnect(const conn_t *first,const conn_t *second)

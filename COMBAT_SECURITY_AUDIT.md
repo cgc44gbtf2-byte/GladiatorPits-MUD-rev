@@ -40,6 +40,23 @@ permadeath, permissions and the historical native player-record ABI. No rewrite.
   and loss with no kill, and both connections/bodies are released afterward.
 - Strict optimized GCC passes 514 game/runtime + 120 account checks and both
   TCP suites after increment 1.
+- Increment 2 first failed the production-dice replay regression: resetting
+  libc's public seed reproduced the same 64-roll sequence. The server had
+  seeded that generator with wall-clock seconds. D10 now uses the already
+  required libsodium's uniform cryptographic generator; startup no longer seeds
+  libc for combat. Range, dice count, hit thresholds and damage rules are
+  unchanged, but random streams intentionally differ. There was no seeded
+  replay interface or persisted RNG state to preserve.
+- A test-only dice override makes rule tests deterministic; its fallback and
+  the randomness/range tests call the real production roller. Coverage includes
+  miss/first and last light hit/first and high heavy hit, odd integer half-damage,
+  ninth-pulse first attacks, speed-plus-three recovery, both turn orders,
+  damage exactly equal to health remaining alive, next-hit permadeath,
+  persisted victory counters and defeated-body cleanup. The seed-independence
+  comparison has a theoretical 10^-64 collision probability; it is not an
+  entropy-quality proof.
+- Strict optimized GCC passes 637 game/runtime + 120 account checks and both
+  TCP suites after increment 2.
 
 ## Coverage limits
 
