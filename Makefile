@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: all clean test account-test integration-test staff-integration-test check sanitize
+.PHONY: all clean test account-test storage-test integration-test staff-integration-test check sanitize
 
 CC ?= cc
 CFLAGS ?= -O2
@@ -26,16 +26,23 @@ account-test: account-tests
 	@mkdir -p .account-test-run
 	@cd .account-test-run && ../account-tests
 
-GAME_SOURCES = glad.c commands.c account_commands.c staff_commands.c telnet.c accounts.c accounts.h player_record.c player_record.h
+storage-tests: storage_tests.c player_storage.c player_storage.h player_record.c player_record.h
+	$(CC) $(CPPFLAGS) -DGLAD_STORAGE_TESTING $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ storage_tests.c player_storage.c player_record.c $(LDLIBS) $(ACCOUNT_LIBS)
+
+storage-test: storage-tests
+	@mkdir -p .storage-test-run
+	@cd .storage-test-run && ../storage-tests
+
+GAME_SOURCES = glad.c commands.c account_commands.c staff_commands.c telnet.c accounts.c accounts.h player_record.c player_record.h player_storage.c player_storage.h
 
 glad: $(GAME_SOURCES)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ glad.c accounts.c player_record.c $(LDLIBS) $(ACCOUNT_LIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ glad.c accounts.c player_record.c player_storage.c $(LDLIBS) $(ACCOUNT_LIBS)
 
 glad-tests: tests.c $(GAME_SOURCES)
-	$(CC) $(CPPFLAGS) -UPORT -DPORT=0 $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ tests.c accounts.c player_record.c $(LDLIBS) $(ACCOUNT_LIBS)
+	$(CC) $(CPPFLAGS) -UPORT -DPORT=0 -DGLAD_STORAGE_TESTING $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ tests.c accounts.c player_record.c player_storage.c $(LDLIBS) $(ACCOUNT_LIBS)
 
 glad-smoke: $(GAME_SOURCES)
-	$(CC) $(CPPFLAGS) -UPORT -DPORT=0 $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ glad.c accounts.c player_record.c $(LDLIBS) $(ACCOUNT_LIBS)
+	$(CC) $(CPPFLAGS) -UPORT -DPORT=0 $(CFLAGS) $(WARNINGS) $(ACCOUNT_FLAGS) $(LDFLAGS) -o $@ glad.c accounts.c player_record.c player_storage.c $(LDLIBS) $(ACCOUNT_LIBS)
 
 test: glad-tests
 	@mkdir -p .test-run
@@ -47,12 +54,12 @@ integration-test: glad-smoke glad-admin
 staff-integration-test: glad-smoke glad-admin
 	python3 tests/staff_smoke.py ./glad-smoke ./glad-admin
 
-check: test account-test integration-test staff-integration-test
+check: test account-test storage-test integration-test staff-integration-test
 
 sanitize:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="-O1 -g -std=c99 -fsanitize=address,undefined -fno-omit-frame-pointer" check
 
 clean:
-	rm -f glad glad-tests glad-smoke glad-admin account-tests
-	rm -rf .test-run .account-test-run
+	rm -f glad glad-tests glad-smoke glad-admin account-tests storage-tests
+	rm -rf .test-run .account-test-run .storage-test-run

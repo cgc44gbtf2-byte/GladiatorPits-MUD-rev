@@ -3,6 +3,11 @@
 /glad-smoke
 /glad-admin
 /account-tests
+/storage-tests
+/.storage-test-run/
+/.glad-settlement
+/.glad-storage.lock
+/.glad-tmp.*
 /.account-test-run/
 /accounts.sqlite3
 /accounts.sqlite3-wal
