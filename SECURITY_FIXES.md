@@ -1,5 +1,9 @@
 # Post-dashboard security and compatibility fixes
 
+This is the historical PR #3 audit-fix log, now merged with PRs #1 and #2.
+[FOLLOWUP_FIXES.md](FOLLOWUP_FIXES.md) records subsequent fixes and current
+verification; the original findings and results below are retained.
+
 ## Plan recorded before implementation
 
 The audit of dashboard commit `07d63dadd4f69d29ee5dd370bcfbc3289a4b36fc`

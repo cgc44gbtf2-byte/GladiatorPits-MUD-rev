@@ -377,6 +377,12 @@ bool GetInput(conn_t*pstConn)
    if((iInput=read(pstConn->iSocket,a_chBuf,MAX_BUF))<=0)
       return iInput<0&&(errno==EINTR||errno==EAGAIN||errno==EWOULDBLOCK);
 
+   if(AccountInputExpired(pstConn))
+   {
+      sodium_memzero(a_chBuf,sizeof(a_chBuf));
+      return FALSE;
+   }
+
    /* Process every complete line; TCP may deliver several in one read. */
    for(i=0;i<(int)iInput;i++)
    {
@@ -384,6 +390,11 @@ bool GetInput(conn_t*pstConn)
          continue;
       if(a_chBuf[i]=='\n')
       {
+         if(AccountInputExpired(pstConn))
+         {
+            sodium_memzero(a_chBuf,sizeof(a_chBuf));
+            return FALSE;
+         }
          pstConn->a_chInBuf[pstConn->iInLen]='\0';
          if(pstConn->bInputTooLong)
          {

@@ -852,6 +852,146 @@ static void TestProgressionCounterLimits(void)
    pstFirstConn=NULL;
 }
 
+static void TestExpiredAuthenticationInput(void)
+{
+   int stage,variant,sockets[2],i;
+   conn_t connection;
+   char large[MAX_BUF];
+   const char *password="regression-test-password-only";
+   const char *batched="regression-test-password-only\nwho\n";
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   for(stage=AUTH_LOGIN_PASSWORD;stage<=AUTH_STAFF_PASSWORD;stage++)
+   {
+      connection=stConnEmpty;
+      connection.eStatus=CROWD;
+      connection.auth_stage=stage;
+      connection.auth_deadline=AuthClock();
+      connection.auth_request_token=50001;
+      connection.connection_token=50001;
+      connection.staff_target=regression_account.id;
+      connection.staff_operation=1;
+      connection.staff_value=ROLE_OWNER;
+      connection.iIp=(uint32_t)(10000+stage);
+      strcpy(connection.account_name,"Regtest");
+      strcpy(connection.auth_password,password);
+      strcpy(connection.auth_old_password,password);
+      strcpy(connection.a_chInBuf,"partial-sensitive-fixture");
+      connection.iInLen=(int)strlen(connection.a_chInBuf);
+      pstFirstConn=&connection;
+      memset(auth_jobs,0,sizeof(auth_jobs));
+      AccountInput(&connection,stage==AUTH_STAFF_CONFIRM?"CONFIRM":password);
+      Check(connection.bClosing&&connection.auth_stage==AUTH_IDLE&&
+         connection.auth_request_token==0,
+         "late input cannot queue work or revive any expired authentication stage");
+      Check(connection.auth_password[0]=='\0'&&connection.auth_old_password[0]=='\0'&&
+         connection.a_chInBuf[0]=='\0'&&connection.iInLen==0&&connection.staff_target==0,
+         "input-time expiry wipes partial credentials and pending metadata");
+      for(i=0;i<AUTH_JOB_COUNT;i++)
+         Check(auth_jobs[i].state==0,"expired input never queues password work");
+   }
+   for(variant=0;variant<3;variant++)
+   {
+      Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"late wire-input sockets");
+      connection=stConnEmpty;
+      connection.eStatus=CROWD;
+      connection.iSocket=sockets[0];
+      connection.auth_stage=AUTH_LOGIN_PASSWORD;
+      connection.auth_deadline=AuthClock();
+      strcpy(connection.account_name,"Regtest");
+      pstFirstConn=&connection;
+      if(variant==0)
+         Check(write(sockets[1],"part",4)==4,"late partial input fixture");
+      else if(variant==1)
+         Check(write(sockets[1],batched,strlen(batched))==(ssize_t)strlen(batched),
+            "late batched password fixture");
+      else
+      {
+         memset(large,'A',sizeof(large));
+         Check(write(sockets[1],large,sizeof(large))==(ssize_t)sizeof(large),
+            "late oversized partial input fixture");
+      }
+      Check(!GetInput(&connection)&&connection.bClosing&&connection.iInLen==0&&
+         connection.a_chInBuf[0]=='\0'&&!OutputContains(&connection,"visible"),
+         "expired wire input is rejected before partial, complete or oversized data is processed");
+      close(sockets[0]);
+      close(sockets[1]);
+   }
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
+static void TestArenaAllocationLimits(void)
+{
+   int variant,i,saved_cursor=arena_sequence;
+   conn_t occupants[4];
+   body_t bodies[4];
+   for(variant=0;variant<3;variant++)
+   {
+      ResetWorld();
+      for(i=STR;i<=WIT;i++)
+         test_body_one.iStats[i]=test_body_two.iStats[i]=1;
+      memset(occupants,0,sizeof(occupants));
+      memset(bodies,0,sizeof(bodies));
+      if(variant==2)
+      {
+         test_conn_two.pstNext=&occupants[0];
+         for(i=0;i<4;i++)
+         {
+            occupants[i].pstBody=&bodies[i];
+            occupants[i].eStatus=FIGHTING;
+            occupants[i].pstPrev=i?&occupants[i-1]:&test_conn_two;
+            occupants[i].pstNext=i<3?&occupants[i+1]:NULL;
+            strcpy(bodies[i].a_chName,"Sentinel");
+            bodies[i].iRoom=1+i/2;
+            bodies[i].pstOpponent=&occupants[i^1];
+         }
+      }
+      arena_sequence=variant==1?INT_MAX-1:INT_MAX;
+      SetInput(&test_conn_one,"challenge Defender");
+      SetInput(&test_conn_two,"accept");
+      Check(test_body_one.iRoom==(variant==1?INT_MAX:variant==2?3:1)&&
+         test_body_two.iRoom==test_body_one.iRoom&&
+         test_conn_one.eStatus==FIGHTING&&test_conn_two.eStatus==FIGHTING,
+         "arena boundaries allocate positive unique rooms without integer overflow");
+      if(variant==2)
+         for(i=0;i<4;i++)
+            Check(bodies[i].iRoom==1+i/2&&bodies[i].pstOpponent==&occupants[i^1],
+               "wrapping leaves existing fights and arena assignments intact");
+   }
+   {
+      conn_t *blocked=calloc(FD_SETSIZE,sizeof(*blocked));
+      body_t *blocked_bodies=calloc(FD_SETSIZE,sizeof(*blocked_bodies));
+      Check(blocked!=NULL&&blocked_bodies!=NULL,"bounded arena-search fixture allocation");
+      ResetWorld();
+      test_conn_two.pstNext=blocked;
+      for(i=0;i<FD_SETSIZE;i++)
+      {
+         blocked[i].pstBody=&blocked_bodies[i];
+         blocked[i].pstNext=i+1<FD_SETSIZE?&blocked[i+1]:NULL;
+         blocked_bodies[i].iRoom=i+1;
+      }
+      arena_sequence=0;
+      SetInput(&test_conn_one,"challenge Defender");
+      test_body_one.iDam=test_body_two.iDam=1;
+      test_body_one.iSpeed=test_body_two.iSpeed=-2;
+      SetInput(&test_conn_two,"accept");
+      Check(test_conn_one.eStatus==CHALLENGER&&test_conn_two.eStatus==GLADIATOR&&
+         test_body_one.iRoom==0&&test_body_two.iRoom==0&&
+         test_body_one.iDam==1&&test_body_two.iDam==1&&
+         test_body_one.iSpeed==-2&&test_body_two.iSpeed==-2&&
+         test_body_one.pstOpponent==&test_conn_two&&
+         OutputContains(&test_conn_two,"arenas are busy"),
+         "bounded-search exhaustion rejects acceptance without changing the pending fight");
+      ClearChallenge(&test_conn_one);
+      test_conn_two.pstNext=NULL;
+      free(blocked);
+      free(blocked_bodies);
+   }
+   arena_sequence=saved_cursor;
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -977,6 +1117,8 @@ int main(void)
    TestCompletedAuthenticationDeadlines();
    TestProgressionCounterLimits();
    TestTelnetInput();
+   TestExpiredAuthenticationInput();
+   TestArenaAllocationLimits();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
