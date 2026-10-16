@@ -26,6 +26,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdint.h>
+#include <limits.h>
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -129,6 +130,7 @@ char   *StatusName      (body_t*pstBody);
 conn_t *FindPerson      (char*szTxt);
 void    Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
+static void IncrementProgression(int *counter,const char *name,const char *field);
 
 /******************************************************************************
  Required global variables.
@@ -733,8 +735,9 @@ void CloseConnection(conn_t*pstConn)
          if(pstConn->eStatus==FIGHTING)
          {
             /* Adjusts wins and losses... */
-            pstConn->pstBody->iLoss++;
-            pstBody->iWin++;
+            IncrementProgression(&pstConn->pstBody->iLoss,
+               pstConn->pstBody->a_chName,"losses");
+            IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
 
             /* ...stop the fighting... */
             pstConn->pstBody->pstOpponent->eStatus=GLADIATOR;
@@ -867,6 +870,16 @@ void GameLoop(int iControl)
  *
  * This function has no return value.
  */
+/* Native saves use int counters. Never wrap valid progression negative. */
+static void IncrementProgression(int *counter,const char *name,const char *field)
+{
+   if(*counter<INT_MAX)
+      ++*counter;
+   else
+      Log("Progression ceiling reached for %s (%s); existing value retained.\n",
+         name,field);
+}
+
 void Update(void)
 {
    conn_t*pstConn,*pstUser,*pstConnNext;
@@ -946,8 +959,8 @@ void Update(void)
                pstUser->eStatus=CROWD;
 
                /* Reward the victor... */
-               pstBody->iWin++;
-               pstBody->iKill++;
+               IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
+               IncrementProgression(&pstBody->iKill,pstBody->a_chName,"kills");
 
                /* ...stop them fighting... */
                pstBody->pstOpponent=NULL;

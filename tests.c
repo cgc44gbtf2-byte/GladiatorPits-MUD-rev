@@ -6,6 +6,7 @@
 #include "glad.c"
 #undef main
 #include <stddef.h>
+#include <limits.h>
 
 static conn_t test_conn_one;
 static conn_t test_conn_two;
@@ -688,6 +689,66 @@ static void TestCompletedAuthenticationDeadlines(void)
    pstFirstConn=NULL;
 }
 
+static void TestProgressionCounterLimits(void)
+{
+   int fight,i;
+   saved_character snapshot;
+   conn_t *loser;
+   ResetWorld();
+   for(i=STR;i<=WIT;i++)
+      test_body_one.iStats[i]=9;
+   test_body_one.iWin=test_body_one.iKill=INT_MAX-1;
+   for(fight=0;fight<2;fight++)
+   {
+      body_t *body=calloc(1,sizeof(*body));
+      Check(body!=NULL,"counter combat body allocation");
+      strcpy(body->a_chName,"Defender");
+      for(i=STR;i<=WIT;i++)
+         body->iStats[i]=1;
+      test_conn_two.pstBody=body;
+      test_conn_two.eStatus=GLADIATOR;
+      Save(body);
+      SetInput(&test_conn_one,"challenge Defender");
+      SetInput(&test_conn_two,"accept");
+      for(i=0;i<20&&test_conn_two.pstBody;i++)
+         Update();
+      Check(test_conn_two.pstBody==NULL&&test_body_one.iWin==INT_MAX&&
+         test_body_one.iKill==INT_MAX,"combat increments to the ceiling without wrapping beyond it");
+      Check(ValidPlayer(&test_body_one,"Attacker")&&
+         CharacterInspect("Attacker",&snapshot)==1&&snapshot.wins==INT_MAX&&
+         snapshot.kills==INT_MAX,"ceiling progression remains valid in the unchanged save format");
+      Check(access("Defender",F_OK)!=0&&errno==ENOENT,"counter ceiling preserves permadeath");
+   }
+   loser=calloc(1,sizeof(*loser));
+   Check(loser!=NULL,"counter surrender connection allocation");
+   loser->pstBody=calloc(1,sizeof(*loser->pstBody));
+   Check(loser->pstBody!=NULL,"counter surrender body allocation");
+   strcpy(loser->pstBody->a_chName,"Loserhero");
+   for(i=STR;i<=WIT;i++)
+      loser->pstBody->iStats[i]=1;
+   loser->pstBody->iLoss=INT_MAX;
+   loser->pstBody->pstOpponent=&test_conn_one;
+   loser->pstNext=&test_conn_one;
+   loser->eStatus=FIGHTING;
+   loser->iSocket=-1;
+   test_conn_one.pstPrev=loser;
+   test_conn_one.pstNext=NULL;
+   test_conn_one.iSocket=-1;
+   test_conn_one.eStatus=FIGHTING;
+   test_body_one.pstOpponent=loser;
+   pstFirstConn=loser;
+   CloseConnection(loser);
+   Check(test_body_one.iWin==INT_MAX&&test_body_one.pstOpponent==NULL&&
+      test_conn_one.eStatus==GLADIATOR,"surrender at the ceiling preserves winner and cleanup");
+   Check(CharacterInspect("Loserhero",&snapshot)==1&&snapshot.losses==INT_MAX,
+      "surrender loss counter remains loadable at the ceiling");
+   Check(CharacterInspect("Attacker",&snapshot)==1&&snapshot.wins==INT_MAX&&
+      snapshot.kills==INT_MAX,"surrender does not corrupt existing ceiling progression");
+   unlink("Attacker");
+   unlink("Loserhero");
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -811,6 +872,7 @@ int main(void)
    TestInGameStaff();
    TestAuthenticationReplay();
    TestCompletedAuthenticationDeadlines();
+   TestProgressionCounterLimits();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);

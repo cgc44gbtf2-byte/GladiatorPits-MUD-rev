@@ -61,6 +61,14 @@ remaining limitations below. Update draft PR #3 only; do not merge or deploy.
   password change the worker has already committed. Such results do not grant
   a session. Staff mutations are different: the worker performs only password
   proof, and the main-thread commit requires the current request and deadline.
+- Increment 3: the new combat ceiling regression first triggered UBSan signed
+  overflow at the win award. Both combat win/kill awards and surrender win/loss
+  awards now use checked increments. A counter at `INT_MAX` retains that exact
+  value and logs its ceiling; it is not reset or rewritten into a new layout.
+  GCC ASan/UBSan with undefined-behavior recovery disabled then passed
+  271 game/runtime + 120 account checks and both TCP suites. New coverage checks
+  `INT_MAX-1` to `INT_MAX`, repeated awards at the ceiling, surrender, loadable
+  saved progression and unchanged permadeath.
 
 ## Release boundary
 
