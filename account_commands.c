@@ -62,6 +62,21 @@ static void AccountCancel(conn_t *connection)
    PutOutput(connection,TO_USER,"\xff\xfc\x01");
 }
 
+/* Periodic polling is not enough: select/input processing can cross a deadline.
+ * Reject late input before it can reset a prompt or queue another request. */
+static int AccountInputExpired(conn_t *connection)
+{
+   if(connection->auth_stage==AUTH_IDLE||AuthClock()<connection->auth_deadline)
+      return 0;
+   AccountCancel(connection);
+   sodium_memzero(connection->a_chInBuf,sizeof(connection->a_chInBuf));
+   connection->iInLen=0;
+   connection->bInputTooLong=FALSE;
+   connection->bClosing=TRUE;
+   PutOutput(connection,TO_USER,"Authentication expired; reconnect and log in.\n\r");
+   return 1;
+}
+
 static int AuthRateAllowed(uint32_t ip)
 {
    size_t i,slot=0;
@@ -246,7 +261,7 @@ static int AccountPoll(void)
          result.request_token!=0&&connection->auth_request_token==result.request_token)
       {
          /* Check before cancellation clears the deadline, for every operation. */
-         if(now>=connection->auth_deadline)
+         if(AuthClock()>=connection->auth_deadline)
          {
             connection->bClosing=TRUE;
             PutOutput(connection,TO_USER,result.operation==4?
@@ -299,7 +314,10 @@ static int AccountPoll(void)
 
 static void AccountInput(conn_t *connection,const char *input)
 {
-   size_t length=strlen(input);
+   size_t length;
+   if(AccountInputExpired(connection))
+      return;
+   length=strlen(input);
    if(connection->auth_stage==AUTH_STAFF_CONFIRM)
    {
       if(strcmp(input,"CONFIRM")!=0)

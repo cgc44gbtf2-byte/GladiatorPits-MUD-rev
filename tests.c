@@ -852,6 +852,75 @@ static void TestProgressionCounterLimits(void)
    pstFirstConn=NULL;
 }
 
+static void TestExpiredAuthenticationInput(void)
+{
+   int stage,variant,sockets[2],i;
+   conn_t connection;
+   char large[MAX_BUF];
+   const char *password="regression-test-password-only";
+   const char *batched="regression-test-password-only\nwho\n";
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   for(stage=AUTH_LOGIN_PASSWORD;stage<=AUTH_STAFF_PASSWORD;stage++)
+   {
+      connection=stConnEmpty;
+      connection.eStatus=CROWD;
+      connection.auth_stage=stage;
+      connection.auth_deadline=AuthClock();
+      connection.auth_request_token=50001;
+      connection.connection_token=50001;
+      connection.staff_target=regression_account.id;
+      connection.staff_operation=1;
+      connection.staff_value=ROLE_OWNER;
+      connection.iIp=(uint32_t)(10000+stage);
+      strcpy(connection.account_name,"Regtest");
+      strcpy(connection.auth_password,password);
+      strcpy(connection.auth_old_password,password);
+      strcpy(connection.a_chInBuf,"partial-sensitive-fixture");
+      connection.iInLen=(int)strlen(connection.a_chInBuf);
+      pstFirstConn=&connection;
+      memset(auth_jobs,0,sizeof(auth_jobs));
+      AccountInput(&connection,stage==AUTH_STAFF_CONFIRM?"CONFIRM":password);
+      Check(connection.bClosing&&connection.auth_stage==AUTH_IDLE&&
+         connection.auth_request_token==0,
+         "late input cannot queue work or revive any expired authentication stage");
+      Check(connection.auth_password[0]=='\0'&&connection.auth_old_password[0]=='\0'&&
+         connection.a_chInBuf[0]=='\0'&&connection.iInLen==0&&connection.staff_target==0,
+         "input-time expiry wipes partial credentials and pending metadata");
+      for(i=0;i<AUTH_JOB_COUNT;i++)
+         Check(auth_jobs[i].state==0,"expired input never queues password work");
+   }
+   for(variant=0;variant<3;variant++)
+   {
+      Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"late wire-input sockets");
+      connection=stConnEmpty;
+      connection.eStatus=CROWD;
+      connection.iSocket=sockets[0];
+      connection.auth_stage=AUTH_LOGIN_PASSWORD;
+      connection.auth_deadline=AuthClock();
+      strcpy(connection.account_name,"Regtest");
+      pstFirstConn=&connection;
+      if(variant==0)
+         Check(write(sockets[1],"part",4)==4,"late partial input fixture");
+      else if(variant==1)
+         Check(write(sockets[1],batched,strlen(batched))==(ssize_t)strlen(batched),
+            "late batched password fixture");
+      else
+      {
+         memset(large,'A',sizeof(large));
+         Check(write(sockets[1],large,sizeof(large))==(ssize_t)sizeof(large),
+            "late oversized partial input fixture");
+      }
+      Check(!GetInput(&connection)&&connection.bClosing&&connection.iInLen==0&&
+         connection.a_chInBuf[0]=='\0'&&!OutputContains(&connection,"visible"),
+         "expired wire input is rejected before partial, complete or oversized data is processed");
+      close(sockets[0]);
+      close(sockets[1]);
+   }
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -977,6 +1046,7 @@ int main(void)
    TestCompletedAuthenticationDeadlines();
    TestProgressionCounterLimits();
    TestTelnetInput();
+   TestExpiredAuthenticationInput();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
