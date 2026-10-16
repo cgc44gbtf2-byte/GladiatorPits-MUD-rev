@@ -159,6 +159,70 @@ static void FinishHeapCombat(void)
    fixed_d10=0;
 }
 
+static void TestChallengeDisconnectAdmission(void)
+{
+   int accepting,variant;
+   for(accepting=1;accepting>=0;accepting--)
+      for(variant=0;variant<(accepting?8:6);variant++)
+      {
+         conn_t *first=HeapCombatPair(),*second=first->pstNext;
+         conn_t *actor=accepting?second:first,*peer=accepting?first:second;
+         conn_t *departing=(variant&1)?peer:actor;
+         conn_t *remaining=departing==first?second:first;
+         saved_character saved;
+         int unchanged;
+         first->pstBody->iDam=2;
+         second->pstBody->iDam=3;
+         first->pstBody->iSpeed=4;
+         second->pstBody->iSpeed=5;
+         Save(first->pstBody);
+         Save(second->pstBody);
+         if(accepting)
+            SetInput(first,"challenge Defender");
+         first->iOutLen=second->iOutLen=0;
+         if(variant<2)
+            departing->bClosing=TRUE;
+         else if(variant<4)
+            departing->bWriteFailed=TRUE;
+         else
+         {
+            /* The final two acceptance cases fail only on the broadcast,
+             * after the individual message has filled the queue exactly. */
+            size_t length=variant<6?1:
+               strlen(departing==actor?"Ok.\n\r":"Defender accepts your challenge!\n\r");
+            departing->iOutLen=MAX_BUF-1-(int)length;
+            memset(departing->a_chOutBuf,'x',(size_t)departing->iOutLen);
+         }
+         SetInput(actor,accepting?"accept":"challenge Defender");
+         unchanged=first->pstBody->iDam==2&&second->pstBody->iDam==3&&
+            first->pstBody->iSpeed==4&&second->pstBody->iSpeed==5&&
+            first->pstBody->iRoom==0&&second->pstBody->iRoom==0&&
+            first->eStatus==(accepting?CHALLENGER:GLADIATOR)&&
+            second->eStatus==GLADIATOR&&
+            first->pstBody->pstOpponent==(accepting?second:NULL)&&
+            second->pstBody->pstOpponent==(accepting?first:NULL);
+         if(variant>=4)
+            Check(departing->bWriteFailed!=FALSE,
+               "challenge admission fixture discovers an actual output failure");
+         CloseConnection(departing);
+         Check(remaining->pstBody->iWin==0&&remaining->pstBody->iLoss==0&&
+            remaining->pstBody->iKill==0,
+            "late challenge/accept cannot fabricate a surrender win or loss");
+         Check(unchanged,"failed challenge admission leaves health, timers, rooms and pending state unchanged");
+         Check(remaining->eStatus==GLADIATOR&&remaining->pstBody->pstOpponent==NULL&&
+            pstFirstConn==remaining&&remaining->pstPrev==NULL&&remaining->pstNext==NULL,
+            "closing a rejected challenge participant safely clears reciprocal links");
+         Check(CharacterInspect("Attacker",&saved)==1&&saved.wins==0&&saved.losses==0&&
+            saved.kills==0&&saved.damage==2&&saved.speed==4&&saved.room==0,
+            "rejected challenge preserves the first saved character");
+         Check(CharacterInspect("Defender",&saved)==1&&saved.wins==0&&saved.losses==0&&
+            saved.kills==0&&saved.damage==3&&saved.speed==5&&saved.room==0,
+            "rejected challenge preserves the second saved character");
+         FinishHeapCombat();
+         Check(pstFirstConn==NULL,"challenge admission fixtures release all connection/body storage");
+      }
+}
+
 static void TestCombatRules(void)
 {
    static const struct {
@@ -1397,6 +1461,7 @@ int main(void)
    TestExpiredAuthenticationInput();
    TestArenaAllocationLimits();
    TestCombatPendingDisconnect();
+   TestChallengeDisconnectAdmission();
    TestCombatRules();
    TestCombatRandomness();
    TestShutdownStorageCleanup();

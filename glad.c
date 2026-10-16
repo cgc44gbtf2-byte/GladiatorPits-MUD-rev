@@ -137,6 +137,7 @@ static int RollD10(void);
 static void ReleaseConnections(void);
 static time_t CombatClock(void);
 static int CombatPulseDue(time_t last,time_t now);
+static int CombatPendingDisconnect(const conn_t *first,const conn_t *second);
 
 /******************************************************************************
  Required global variables.

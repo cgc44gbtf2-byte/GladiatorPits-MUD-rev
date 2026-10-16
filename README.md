@@ -98,7 +98,7 @@ Runtime dependencies are libsodium, SQLite, and POSIX threads. The TCP and
 in-game staff integration tests use Python 3's standard library:
 
 ```sh
-make check       # 665 game + 120 account checks, gameplay and in-game staff TCP suites
+make check       # 805 game + 120 account checks, gameplay and in-game staff TCP suites
 make sanitize    # repeat all native/TCP suites under ASan/UBSan
 make clean
 ```

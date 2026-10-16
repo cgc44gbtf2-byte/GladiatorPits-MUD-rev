@@ -111,3 +111,34 @@ comparison; no gameplay conversion or warning suppression was introduced.
 This is bounded source review and fixture-based verification, not an exhaustive
 memory/security certification. Retain the TLS, ABI, filesystem crash/disk-full,
 production-load/DoS and broader-platform limitations in prior audit logs.
+
+## Follow-up cleanup: challenge admission
+
+Continue from tested PR #6 head
+`d614aa5f82df4c7c56a7015f1fc740343dea06b1`. All 28 local source files match
+that head before this increment; PR #6 is still draft with no review/issue
+comments or competing open PRs. `master` is unchanged.
+
+Plan: reproduce whether a pending-close challenger can still be accepted and
+gain an artificial surrender result when cleanup runs. Reject new challenge
+admission for either closing/write-failed participant, including output failure
+while sending challenge/acceptance messages. Preserve ordinary live duels,
+existing pending challenge cleanup, counters and player-record bytes. Add
+heap-owned lifecycle regressions and rerun the shared compiler/sanitizer matrix
+and hosted CI before updating the draft. Do not merge or modify required checks.
+
+The first regression failed with `late challenge/accept cannot fabricate a
+surrender win or loss`: accepting a closing challenger changed both endpoints
+to fighting, so ordinary cleanup persisted a win/loss for a fight that should
+never have started. Both handlers now check pending-close/write-failed state
+before admission and after relevant output operations. Acceptance also checks
+after the global arena announcement, whose enqueue can itself fail.
+
+Fourteen heap-owned cases exercise either endpoint already closing/write-failed,
+either endpoint failing on an individual message, and either endpoint failing
+only on the acceptance broadcast. They verify no fabricated counters, unchanged
+damage/speed/room and pending state, preserved saved characters and full cleanup.
+GCC optimized passes 805 game/runtime + 120 account checks and both TCP suites.
+
+Next, reproduce the equivalent admission window for an account whose session
+has been revoked but has not yet been marked closing by periodic polling.
