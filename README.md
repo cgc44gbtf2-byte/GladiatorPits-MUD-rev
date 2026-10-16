@@ -1,25 +1,64 @@
-# Gladiator Pits
+# Gladiator Pits MUD
 
 [![Native CI](https://github.com/cgc44gbtf2-byte/GladiatorPits-MUD-rev/actions/workflows/native-ci.yml/badge.svg)](https://github.com/cgc44gbtf2-byte/GladiatorPits-MUD-rev/actions/workflows/native-ci.yml)
 
-(A Go rewrite is available [here](https://github.com/servusDei2018/GladiatorPits-Go).)
+**v1.0.0-rc.1 — public source release candidate**
 
-### Building
+A modernized version of Richard Woolcock's original C player-versus-player arena
+MUD, maintained with modernization contributions by LaWaylon Battles (aKa Yami).
+This repository is public. Runtime accounts, passwords, character records and
+operator data must remain private and must never be committed or distributed.
 
-This candidate is a clean public source release with fresh accounts/characters,
-not the planned derivative. Read [RELEASE.md](RELEASE.md) for fresh installation,
-source artifact validation, approval/rollback gates and secure-hosting caveats.
-See [release notes](RELEASE_NOTES.md) and [attribution](THIRD_PARTY_NOTICES.md).
+This release preserves the legacy game rather than rewriting it. Derivative
+development will use a separate baseline/branch after this release; those future
+features are not part of this candidate.
 
-This maintains the [original](https://github.com/servusdei2018/GladiatorPits-MUD/tree/original) C game rather than rewriting it. The modernization pass preserves its stat formulas, training rules, PvP combat, progression, and native binary player record layout while improving I/O safety, persistence, and portability. See [MODERNIZATION.md](MODERNIZATION.md) for the audit, phased plan, change/failure log, and remaining issues.
+### What is included
+
+- Legacy training/stat formulas, challenges, arena combat, surrender, permanent
+  death, titles and progression; original native player-record layout retained.
+- Prompted accounts with Argon2id password hashes, character ownership, password
+  changes, session revocation and Player/Builder/Moderator/Administrator/Owner roles.
+- An in-game staff dashboard for inspection, account access, roles and auditing.
+- Checked saves, recoverable combat settlement, startup replay and storage locking.
+- Optional trusted PROXY v1 support for TLS gateways, including IPv4/IPv6 client
+  identity and separate per-player-address login limits.
+- GCC/Clang CI, native regressions, real TCP/TLS tests and source-package checks.
+
+This is a release candidate, not a promise of production readiness or a complete
+world editor. Read [release notes](RELEASE_NOTES.md), [hosting guidance](HOSTING.md),
+[release/recovery procedures](RELEASE.md) and [attribution](THIRD_PARTY_NOTICES.md).
+
+### Download and build
+
+Use the versioned source from the
+[GitHub releases page](https://github.com/cgc44gbtf2-byte/GladiatorPits-MUD-rev/releases)
+or clone the release tag:
+
+```sh
+git clone --branch v1.0.0-rc.1 --depth 1 https://github.com/cgc44gbtf2-byte/GladiatorPits-MUD-rev.git
+cd GladiatorPits-MUD-rev
+```
 
 Build on a POSIX system with a C99 compiler, Make, pkg-config, libsodium
 development headers (1.0.18+), and SQLite development headers (3.31+). This
 build produces the game and its local account administration tool:
 
 ```sh
+# Ubuntu/Debian; Python/OpenSSL are for tests, not the running MUD.
+sudo apt-get update
+sudo apt-get install build-essential pkg-config libsodium-dev libsqlite3-dev python3 openssl git
+```
+
+```sh
+make release-check  # before building, in the fresh clone/unpacked source
 make
 ```
+
+Linux x86_64 is the validated target. Other POSIX systems may require changes;
+native Windows, macOS and other architectures are not verified support claims.
+The modernization history and compatibility boundaries are in
+[MODERNIZATION.md](MODERNIZATION.md).
 
 The default TCP port remains 3000. A different port can be selected at build time, for example with `make CPPFLAGS=-DPORT=4000`.
 
@@ -29,8 +68,18 @@ Run the executable from a private data directory (prefer mode 0700): player reco
 `log.txt`, and the new `accounts.sqlite3` database are stored in its working
 directory. The directory must belong to the running OS user and not be writable
 by group/other users; the database must be a regular, owner-only file. Back up
-existing player files before testing any new build. Native player records are
-not migrated or reset.
+existing player files before testing any new build. A fresh public installation
+starts in a new data directory with no accounts or characters; never delete or
+reset another installation to achieve that. Native records are not migrated.
+
+From the built source directory:
+
+```sh
+SOURCE_DIR="$(pwd)"
+install -d -m 700 "$HOME/gladiatorpits-data"
+cd "$HOME/gladiatorpits-data"
+"$SOURCE_DIR/glad"
+```
 
 The server now binds **127.0.0.1** by default. Put it behind a TLS-capable MUD
 gateway or secure tunnel before transmitting passwords remotely. An explicit
@@ -91,7 +140,17 @@ world/player editing is not implemented. There is no browser console, extra
 listening port, web dependency or web session system.
 
 Bootstrap Owner locally as described in [ACCOUNTS.md](ACCOUNTS.md); no default
-staff credentials exist. Read [DASHBOARD.md](DASHBOARD.md) before upgrading:
+staff credentials exist. Register your account through the separate MUD password
+prompts, then, in another local terminal, run the administration tool from the
+same private data directory:
+
+```sh
+cd "$HOME/gladiatorpits-data"
+/absolute/path/to/GladiatorPits-MUD-rev/glad-admin role YourAccount owner
+```
+
+Verify `account` and `staff` in the MUD. New registrations are always Player;
+the first registrant is not automatically staff. Read [DASHBOARD.md](DASHBOARD.md) before upgrading:
 account schema 1 → 2 is additive, but back up/stage data and upgrade the game and
 local admin tool together. Native player files are not migrated.
 
@@ -137,13 +196,30 @@ ownership/progress. It is bounded validation, not a production capacity claim.
 
 Tests use disposable directories and an ephemeral TCP port, not live player records. GCC 15 and Clang 20 have been verified; use `make clean` before switching compiler or build flags.
 
+### Release-candidate limitations
+
+Public source availability does not mean a live public server is deployed.
+The backend is plain TCP and must stay protected behind a tested encrypted
+gateway/tunnel before remote password use. An HAProxy example and automated
+certificate-verified forwarding fixture are included, but actual HAProxy/Mudlet
+deployment, certificate renewal and production firewall/routing are not certified.
+
+The staff interface is in-game; character inspection is read-only and full
+world/player editing is future work. Native saves/journals depend on the ABI and
+endianness of the build. Five-minute synthetic soaks are not long-duration or
+capacity certification; the longer endurance run remains deferred. No test suite
+proves the code leak-free or vulnerability-free.
+
 ### History
 
 Gladiator Pits is a [MUD](https://en.wikipedia.org/wiki/MUD), written by Richard Woolcock, who wrote the now-famous [GodWars](https://en.wikipedia.org/wiki/GodWars) codebase.
 
-Popular in the 20th century, MUDs are text-baased Multi-player games, similar to our modern day MMOs.
+MUDs are text-based multiplayer games. Gladiator Pits is a compact PvP arena game
+whose original source and documentation are preserved here.
 
-Gladiator Pits, of which this source code is the only public version (to my knowledge) still available, is a excellent example of a MUD, clearly commented, with precision and intuitivity.
+The [original C upstream](https://github.com/servusdei2018/GladiatorPits-MUD/tree/original)
+and the separate [upstream Go rewrite](https://github.com/servusDei2018/GladiatorPits-Go)
+are historical references, not dependencies of this maintained C release.
 
 ### License
 
@@ -162,6 +238,7 @@ Richard Woolcock's original game copyright and permission notices remain intact.
 
 ### Disclaimer
 
-I in no way claim authorship, nor authority, over this excellent piece of code,
-but release it, under its author's original terms and conditions, to the general
-public.
+Richard Woolcock is credited for the original game; LaWaylon Battles (aKa Yami)
+is credited for modernization contributions, not authorship of the original.
+The public source is provided under the retained license and permission notices,
+without warranty. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

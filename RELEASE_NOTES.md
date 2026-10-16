@@ -1,4 +1,4 @@
-# Clean-source modernization candidate — unreleased
+# Gladiator Pits v1.0.0-rc.1 — public source release candidate
 
 This is the maintained legacy C game, not the planned derivative. It starts with
 fresh accounts/characters; no existing-player migration is a release requirement.
@@ -52,5 +52,7 @@ certificate management is added. Five-minute synthetic soaks are not one-hour/
 real disk exhaustion, deployed TLS and actual Mudlet sessions remain unverified.
 Read `STORAGE_RECOVERY.md` before operating a persistent instance.
 
-The source candidate is not a security/leak-free certification. Merge, version,
-tag, source-asset publication and derivative branching require separate approval.
+The source candidate is not a security/leak-free certification. The approved
+publication sequence is green checks, merge PR #6, then publish this prerelease
+from that exact merged master commit. It does not deploy a public server.
+Derivative branching and development remain a separate next step.

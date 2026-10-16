@@ -1,5 +1,18 @@
 # Public clean-source release readiness
 
+## v1.0.0-rc.1 publication decision
+
+The selected public-source candidate is `v1.0.0-rc.1`. The repository is public;
+runtime data directories remain private. The authorized order is to finish the
+public README, verify the final PR checks, merge PR #6, then tag/publish a GitHub
+prerelease from the exact merged master commit. Never release the unmerged PR
+head instead. Verify master CI and source contents before publication.
+
+Earlier audit/rehearsal observations below are historical, not a statement that
+the repository is private or that the approved version is still undecided.
+No public game endpoint is deployed by the source-release process. Derivative
+development remains separate.
+
 ## Scope and audit
 
 Release the maintained legacy game first, starting with fresh characters. Keep
