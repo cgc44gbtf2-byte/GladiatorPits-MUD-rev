@@ -1592,6 +1592,90 @@ static void TestAllTrainingCommands(void)
    pstFirstConn=NULL;
 }
 
+static void TestDeathStorageFailure(void)
+{
+   conn_t *winner=HeapCombatPair(),*victim=winner->pstNext;
+   saved_character saved;
+   int i,fd;
+   strcpy(winner->pstBody->a_chName,"Deathwinner");
+   strcpy(victim->pstBody->a_chName,"Deathvictim");
+   for(i=STR;i<=WIT;i++)
+      winner->pstBody->iStats[i]=9;
+   victim->pstBody->iDam=HEALTH(victim->pstBody)-1;
+   Check(Save(winner->pstBody)&&Save(victim->pstBody),"death storage baseline records");
+   Check(rename("Deathvictim",".death-before")==0&&mkdir("Deathvictim",0700)==0,
+      "retain the original record while simulating an unsafe deletion target");
+   fd=open("Deathvictim/retained",O_CREAT|O_WRONLY|O_EXCL,0600);
+   Check(fd>=0&&close(fd)==0,"nonempty target cannot be removed by legacy remove");
+   winner->eStatus=victim->eStatus=FIGHTING;
+   winner->pstBody->pstOpponent=victim;
+   victim->pstBody->pstOpponent=winner;
+   winner->pstBody->iRoom=victim->pstBody->iRoom=1;
+   winner->pstBody->iSpeed=SPEED(winner->pstBody)-1;
+   fixed_d10=10;
+   Update();
+   Check(victim->pstBody!=NULL&&winner->pstBody->iWin==0&&
+      winner->pstBody->iKill==0,"failed death deletion cannot free victim or award a live victory");
+   Check(bStorageFailed&&bShutdown&&victim->pstBody->iDam==HEALTH(victim->pstBody)-1&&
+      !OutputContains(winner,"has killed"),"failed death halts before damage/kill-success state");
+   Update();
+   Check(winner->pstBody->iWin==0&&victim->pstBody!=NULL,
+      "halted combat cannot retry or invent a second outcome");
+   Check(unlink("Deathvictim/retained")==0&&rmdir("Deathvictim")==0&&
+      rename(".death-before","Deathvictim")==0,"unsafe test target and original record retained");
+   ReleaseConnections();
+   PlayerStorageClose();
+   Check(PlayerStorageOpen(),"startup completes the prepared death after target repair");
+   Check(CharacterInspect("Deathwinner",&saved)==1&&saved.wins==1&&saved.kills==1&&
+      access("Deathvictim",F_OK)!=0&&errno==ENOENT,"death recovery awards once and prevents resurrection");
+   PlayerStorageClose();
+   Check(PlayerStorageOpen()&&CharacterInspect("Deathwinner",&saved)==1&&
+      saved.wins==1&&saved.kills==1,"second restart does not duplicate death progression");
+   Check(unlink("Deathwinner")==0,"death-failure fixture record cleanup");
+   fixed_d10=0;
+   bStorageFailed=bShutdown=FALSE;
+}
+
+static void TestSurrenderStorageFailure(void)
+{
+   int departing_first;
+   for(departing_first=0;departing_first<=1;departing_first++)
+   {
+      conn_t *first=HeapCombatPair(),*second=first->pstNext;
+      conn_t *departing=departing_first?first:second,*remaining=departing_first?second:first;
+      saved_character saved;
+      char winner_name[16],loser_name[16];
+      strcpy(first->pstBody->a_chName,"Surrenderone");
+      strcpy(second->pstBody->a_chName,"Surrendertwo");
+      strcpy(winner_name,remaining->pstBody->a_chName);
+      strcpy(loser_name,departing->pstBody->a_chName);
+      Check(Save(first->pstBody)&&Save(second->pstBody),"surrender storage baseline records");
+      first->eStatus=second->eStatus=FIGHTING;
+      first->pstBody->pstOpponent=second;
+      second->pstBody->pstOpponent=first;
+      first->pstBody->iRoom=second->pstBody->iRoom=1;
+      StorageTestFault(ST_RECORD_RENAME,2,ENOSPC,0);
+      CloseConnection(departing);
+      Check(pstFirstConn==first&&first->pstNext==second&&second->pstPrev==first,
+         "failed surrender retains owned connections until orderly shutdown");
+      Check(bStorageFailed&&bShutdown&&remaining->pstBody->iWin==0&&
+         departing->pstBody->iLoss==0&&first->eStatus==FIGHTING&&
+         second->eStatus==FIGHTING,"failed second record does not commit a partial live surrender");
+      ReleaseConnections();
+      PlayerStorageClose();
+      Check(PlayerStorageOpen(),"restart finishes both surrender after-images");
+      Check(CharacterInspect(winner_name,&saved)==1&&saved.wins==1&&
+         saved.losses==0&&saved.kills==0,"recovered surrender winner is awarded exactly once");
+      Check(CharacterInspect(loser_name,&saved)==1&&saved.losses==1&&
+         saved.wins==0&&saved.kills==0,"recovered surrender loser is retained with one loss");
+      PlayerStorageClose();
+      Check(PlayerStorageOpen()&&CharacterInspect(loser_name,&saved)==1&&
+         saved.losses==1,"replaying a completed surrender cannot add another loss");
+      Check(unlink(winner_name)==0&&unlink(loser_name)==0,"surrender-failure fixture cleanup");
+      bStorageFailed=bShutdown=FALSE;
+   }
+}
+
 static void TestTrainingStorageFailure(void)
 {
    ResetWorld();
@@ -1663,6 +1747,8 @@ int main(void)
    TestShutdownStorageCleanup();
    TestCombatHeartbeat();
    TestTrainingStorageFailure();
+   TestDeathStorageFailure();
+   TestSurrenderStorageFailure();
    AccountsClose();
    PlayerStorageClose();
    unlink("regression-accounts.sqlite3");

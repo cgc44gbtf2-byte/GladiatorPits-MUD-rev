@@ -779,6 +779,8 @@ static void ReleaseConnections(void)
 
 void CloseConnection(conn_t*pstConn)
 {
+   if(bStorageFailed)
+      return; /* Orderly shutdown releases storage without new settlement. */
    /* Must free their body, if they've created one */
    if(pstConn->pstBody)
    {
@@ -790,16 +792,21 @@ void CloseConnection(conn_t*pstConn)
       {
          body_t*pstBody=pstConn->pstBody->pstOpponent->pstBody;
 
-         /* Always clear their opponent (in case of an unaccepted challenge) */
-         pstBody->pstOpponent=NULL;
-
          /* Check whether you quit while actually fighting (a surrender) */
          if(pstConn->eStatus==FIGHTING)
          {
-            /* Adjusts wins and losses... */
-            IncrementProgression(&pstConn->pstBody->iLoss,
-               pstConn->pstBody->a_chName,"losses");
-            IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
+            body_t winner=*pstBody,loser=*pstConn->pstBody;
+            IncrementProgression(&loser.iLoss,loser.a_chName,"losses");
+            IncrementProgression(&winner.iWin,winner.a_chName,"wins");
+            winner.iRoom=0;
+            /* Prepare both absolute outcomes before changing live state. */
+            if(!PlayerStorageCommit(&winner,&loser,NULL))
+            {
+               StorageFailure("surrender");
+               return;
+            }
+            pstBody->iWin=winner.iWin;
+            pstConn->pstBody->iLoss=loser.iLoss;
 
             /* ...stop the fighting... */
             pstConn->pstBody->pstOpponent->eStatus=GLADIATOR;
@@ -807,10 +814,9 @@ void CloseConnection(conn_t*pstConn)
             /* ...return them to the stadium... */
             pstBody->iRoom=0;
 
-            /* ...and save both you and them! */
-            Save(pstBody);
-            Save(pstConn->pstBody);
          }
+         /* Clear the reciprocal link only after settlement succeeds. */
+         pstBody->pstOpponent=NULL;
       }
 
       PutOutput(pstConn,TO_WORLD,"%s vanishes into the crowd.\n\r",pstConn->pstBody->a_chName);
@@ -970,6 +976,9 @@ void Update(void)
    char*szYou,*szThem;
    int iDam,iResult;
 
+   if(bStorageFailed)
+      return;
+
    /* Loop through all of the connections */
    for(pstConn=pstFirstConn;pstConn;pstConn=pstConnNext)
    {
@@ -1030,20 +1039,25 @@ void Update(void)
             if(CombatPendingDisconnect(pstConn,pstUser))
                continue;
 
-            /* Inflict the damage */
-            pstBody2->iDam+=iDam;
-
             /* See if you've killed them */
-            if(pstBody2->iDam>HEALTH(pstBody2))
+            if(pstBody2->iDam+iDam>HEALTH(pstBody2))
             {
+               body_t winner=*pstBody;
+               IncrementProgression(&winner.iWin,winner.a_chName,"wins");
+               IncrementProgression(&winner.iKill,winner.a_chName,"kills");
+               winner.iRoom=0;
+               if(!PlayerStorageCommit(&winner,NULL,pstBody2->a_chName))
+               {
+                  StorageFailure("death");
+                  return;
+               }
+
                /* Send the victory message */
                PutOutput(pstConn,TO_ALL,"[%s has killed %s in the arena!]\n\r",
                   pstBody->a_chName,pstBody2->a_chName);
 
-               /* Wipe the loser's player file */
-               remove(pstBody2->a_chName);
-
                /* Free the loser's body */
+               sodium_memzero(pstBody2,sizeof(*pstBody2));
                free(pstBody2);
 
                /* Refresh the loser's connection structure */
@@ -1051,8 +1065,8 @@ void Update(void)
                pstUser->eStatus=CROWD;
 
                /* Reward the victor... */
-               IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
-               IncrementProgression(&pstBody->iKill,pstBody->a_chName,"kills");
+               pstBody->iWin=winner.iWin;
+               pstBody->iKill=winner.iKill;
 
                /* ...stop them fighting... */
                pstBody->pstOpponent=NULL;
@@ -1061,9 +1075,9 @@ void Update(void)
                /* ...return them to the stadium... */
                pstBody->iRoom=0;
 
-               /* ...and save them! */
-               Save(pstBody);
             }
+            else
+               pstBody2->iDam+=iDam;
          }
       }
    }
