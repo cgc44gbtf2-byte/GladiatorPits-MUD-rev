@@ -1592,11 +1592,45 @@ static void TestAllTrainingCommands(void)
    pstFirstConn=NULL;
 }
 
+static void TestTrainingStorageFailure(void)
+{
+   ResetWorld();
+   strcpy(test_body_one.a_chName,"Failsave");
+   test_body_one.iStats[STR]=9;
+   test_body_one.iStats[DEX]=9;
+   test_body_one.iStats[STA]=9;
+   test_body_one.iStats[SIZ]=2;
+   test_body_one.iStats[WIT]=1;
+   test_body_one.iRoom=-1;
+   test_conn_one.eStatus=TRAINING;
+   Check(rmdir("Failsave")==0||errno==ENOENT,"no stale failed-save directory fixture");
+   Check(mkdir("Failsave",0700)==0,"failed-save target directory fixture");
+   SetInput(&test_conn_one,"leave");
+   Check(test_conn_one.eStatus==TRAINING&&test_body_one.iRoom==-1,
+      "failed training save cannot announce or commit a successful departure");
+   Check(bStorageFailed&&bShutdown&&!OutputContains(&test_conn_one,"You leave"),
+      "storage failure halts gameplay without a false training-success message");
+   SetInput(&test_conn_one,"str");
+   Check(test_body_one.iStats[STR]==9,"halted game ignores further input");
+   Check(rmdir("Failsave")==0,"failed-save target directory is retained");
+   PlayerStorageClose();
+   Check(PlayerStorageOpen(),"restart completes the pending training save");
+   {
+      saved_character snapshot;
+      Check(CharacterInspect("Failsave",&snapshot)==1&&snapshot.room==0&&
+         snapshot.stats[STR]==9,"recovered training result preserves assigned stats");
+   }
+   Check(unlink("Failsave")==0,"training-failure fixture record cleanup");
+   bStorageFailed=bShutdown=FALSE;
+   pstFirstConn=NULL;
+}
+
 int main(void)
 {
    signal(SIGPIPE,SIG_IGN);
    unlink("regression-accounts.sqlite3");
    Check(AccountsOpen("regression-accounts.sqlite3"),"regression account database opens");
+   Check(PlayerStorageOpen(),"regression player storage opens");
    Check(AccountRegister("Regtest","regression-test-password-only",&regression_account),
       "gameplay fixtures have an authenticated account");
    TestCharacterCreation();
@@ -1628,7 +1662,9 @@ int main(void)
    TestCombatRandomness();
    TestShutdownStorageCleanup();
    TestCombatHeartbeat();
+   TestTrainingStorageFailure();
    AccountsClose();
+   PlayerStorageClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);
    return EXIT_SUCCESS;

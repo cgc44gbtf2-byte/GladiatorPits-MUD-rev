@@ -396,6 +396,15 @@ CMD(Leave)
    for(i=STR;i<=WIT;i++)
       iCount+=pstConn->pstBody->iStats[i];
 
+   /* Persist the departure before announcing success or changing live state. */
+   if(iCount>=MAX_TRAIN)
+   {
+      body_t saved=*pstConn->pstBody;
+      saved.iRoom=0;
+      if(!Save(&saved))
+         return;
+   }
+
    /* Display the message to the user and others in the room */
    PutOutput(pstConn,TO_USER,"You leave the training room.\n\r");
    PutOutput(pstConn,TO_ROOM,"%s leaves the training room.\n\r", 
@@ -413,8 +422,6 @@ CMD(Leave)
    {
       pstConn->eStatus=GLADIATOR;
 
-      /* Gladiators can save! */
-      Save(pstConn->pstBody);
    }
    else/* Otherwise they're still a CITIZEN */
       pstConn->eStatus=CITIZEN;

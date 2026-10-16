@@ -69,3 +69,25 @@ no environment-variable or client-command activation.
 GCC optimized strict C99: **961 game/runtime + 159 account/security + 479
 storage/recovery checks and both TCP suites passed**. Integration into gameplay
 and final compiler/sanitizer matrix are the next increments.
+
+### Increment 2: checked saves and fail-closed startup/training
+
+First reproduced the legacy defect with an intact directory at the player-file
+target: `FAIL: failed training save cannot announce or commit a successful
+departure`. Save now returns status through the storage backend. Fully trained
+departure persists a room-0 snapshot before changing live room/status or announcing
+success. Input and the main loop stop on storage failure; the server exits nonzero
+and orderly storage-only connection release avoids inventing disconnect outcomes.
+
+Startup acquires storage ownership and completes recovery before opening the
+listener; lock or recovery errors refuse startup. An additional real-TCP suite
+uses production binaries without fault hooks: a failed training save halts,
+another process is rejected, unsafe/corrupted pending intent blocks startup, and
+corrected fixture storage recovers training while retaining login/ownership.
+Native regression also confirms no false success message and input is ignored
+after a storage failure.
+
+GCC optimized strict C99: **973 game/runtime + 159 account/security + 479
+storage/recovery checks and all three TCP suites passed**. Combat still uses the
+old separate settlement calls in this intermediate increment; coupling those
+outcomes is the next change.

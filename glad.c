@@ -44,6 +44,7 @@
 #include <sodium.h>
 #include "accounts.h"
 #include "player_record.h"
+#include "player_storage.h"
 
 /******************************************************************************
  Required literals.
@@ -130,11 +131,12 @@ void    Log             (char*szTxt,...);
 void    TrainStat       (conn_t*pstConn,char*szTxt,int iStat);
 char   *StatusName      (body_t*pstBody);
 conn_t *FindPerson      (char*szTxt);
-void    Save            (body_t*pstBody);
+int     Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
 static void IncrementProgression(int *counter,const char *name,const char *field);
 static int RollD10(void);
 static void ReleaseConnections(void);
+static void StorageFailure(const char *operation);
 static time_t CombatClock(void);
 static int CombatPulseDue(time_t last,time_t now);
 static int CombatPendingDisconnect(const conn_t *first,const conn_t *second);
@@ -170,6 +172,7 @@ static struct connection
 conn_t     *pstFirstConn=NULL; /* Connection list */
 fd_set      a_sFd;             /* Array of socket flags */
 bool        bShutdown=FALSE;   /* When TRUE, shut mud down */
+static bool bStorageFailed=FALSE;
 
 extern const cmd_table_t kstCmdTable[];
 
@@ -246,11 +249,18 @@ int main(void)
       Log("Cannot initialize private account storage/authentication worker.\n");
       return EXIT_FAILURE;
    }
+   if(!PlayerStorageOpen())
+   {
+      Log("Cannot lock/recover player storage: %s. No listener opened.\n",strerror(errno));
+      AccountRuntimeStop();
+      return EXIT_FAILURE;
+   }
 
    /* Initialise the control socket */
    iControl=InitSocket();
    if(iControl<0)
    {
+      PlayerStorageClose();
       AccountRuntimeStop();
       return EXIT_FAILURE;
    }
@@ -266,9 +276,10 @@ int main(void)
    close(iControl);
    AccountRuntimeStop();
    ReleaseConnections();
+   PlayerStorageClose();
 
    /* Exit the program */
-   return 0;
+   return bStorageFailed?EXIT_FAILURE:EXIT_SUCCESS;
 }
 
 
@@ -452,6 +463,8 @@ void ParseInput(conn_t*pstConn)
 {
    char *szTxt=pstConn->a_chInBuf;
    int  i;
+   if(bStorageFailed)
+      return;
    if(pstConn->auth_stage!=AUTH_IDLE)
    {
       AccountInput(pstConn,pstConn->a_chInBuf);
@@ -878,6 +891,8 @@ void GameLoop(int iControl)
          Update();
          tTime=CombatClock();
       }
+      if(bStorageFailed)
+         break;
 
       /* Check if iControl is in the sFd descriptor set */
       if(FD_ISSET(iControl,&sFd))
@@ -901,6 +916,8 @@ void GameLoop(int iControl)
             CloseConnection(pstConn);
          else if(FlushOutput(pstConn)<0)
             CloseConnection(pstConn);
+         if(bStorageFailed)
+            break;
       }
    }
    while (!bShutdown);
@@ -1205,59 +1222,27 @@ void ClearChallenge(conn_t*pstConn)
 }
 
 
-/* Function: Save
- *
- * This function saves the specified body.
- *
- * The function takes one parameter, as follows:
- *
- * pstBody: A pointer to the body to be saved.
- *
- * This function has no return value.
- */
-void Save(body_t*pstBody)
+/* Halt without triggering ordinary disconnect/surrender writes. */
+static void StorageFailure(const char *operation)
 {
-   body_t stSaved=*pstBody;
-   char a_chTemporary[64];
-   FILE *pPlayerFile;
-   int iFd;
-   bool bSaved;
+   int error=errno;
+   Log("Player storage %s failed: %s. Gameplay halted; recovery required.\n",
+      operation,strerror(error));
+   bStorageFailed=TRUE;
+   bShutdown=TRUE;
+   PutOutput(NULL,TO_ALL,
+      "Storage failure: gameplay halted. Reconnect after operator recovery; "
+      "pending results may be recovered.\n\r");
+   errno=error;
+}
 
-   if(!memchr(pstBody->a_chName,'\0',sizeof(pstBody->a_chName))||
-      !ValidPlayerName(pstBody->a_chName))
+/* Returns nonzero only after the complete journaled save is durable. */
+int Save(body_t*pstBody)
+{
+   if(!PlayerStorageCommit(pstBody,NULL,NULL))
    {
-      Log("Cannot save a character with an invalid name.\n");
-      return;
+      StorageFailure("save");
+      return 0;
    }
-
-   /* Retain the legacy layout, but never persist a live process pointer. */
-   stSaved.pstOpponent=NULL;
-   snprintf(a_chTemporary,sizeof(a_chTemporary),".%s.XXXXXX",
-      pstBody->a_chName);
-   iFd=mkstemp(a_chTemporary);
-   if(iFd<0)
-   {
-      Log("Cannot create temporary player save: %s\n",strerror(errno));
-      return;
-   }
-   pPlayerFile=fdopen(iFd,"wb");
-   if(!pPlayerFile)
-   {
-      close(iFd);
-      remove(a_chTemporary);
-      Log("Cannot open temporary player save.\n");
-      return;
-   }
-   bSaved=fwrite(&stSaved,sizeof(stSaved),1,pPlayerFile)==1&&
-      fflush(pPlayerFile)==0&&fsync(iFd)==0;
-   if(fclose(pPlayerFile)!=0)
-      bSaved=FALSE;
-
-   /* The original player file remains intact unless the full save succeeds. */
-   if(!bSaved||rename(a_chTemporary,pstBody->a_chName)!=0)
-   {
-      Log("Save failed for %s; original player file retained.\n",
-         pstBody->a_chName);
-      remove(a_chTemporary);
-   }
+   return 1;
 }

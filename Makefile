@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: all clean test account-test storage-test integration-test staff-integration-test check sanitize
+.PHONY: all clean test account-test storage-test integration-test staff-integration-test storage-integration-test check sanitize
 
 CC ?= cc
 CFLAGS ?= -O2
@@ -54,7 +54,10 @@ integration-test: glad-smoke glad-admin
 staff-integration-test: glad-smoke glad-admin
 	python3 tests/staff_smoke.py ./glad-smoke ./glad-admin
 
-check: test account-test storage-test integration-test staff-integration-test
+storage-integration-test: glad-smoke glad-admin
+	python3 tests/storage_smoke.py ./glad-smoke ./glad-admin
+
+check: test account-test storage-test integration-test staff-integration-test storage-integration-test
 
 sanitize:
 	$(MAKE) clean
