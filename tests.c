@@ -5,6 +5,8 @@
 #define main glad_server_main
 #include "glad.c"
 #undef main
+#include <stddef.h>
+#include <limits.h>
 
 static conn_t test_conn_one;
 static conn_t test_conn_two;
@@ -224,12 +226,20 @@ static void TestOutputSafety(void)
    pstFirstConn=NULL;
 }
 
+static int OutputHasBytes(conn_t *connection,const void *bytes,size_t length)
+{
+   size_t offset,total=(size_t)connection->iOutLen;
+   if(length>total)
+      return 0;
+   for(offset=0;offset<=total-length;offset++)
+      if(memcmp(connection->a_chOutBuf+offset,bytes,length)==0)
+         return 1;
+   return 0;
+}
+
 static int OutputContains(conn_t *pstConn,const char *szText)
 {
-   char a_chOutput[MAX_BUF];
-   memcpy(a_chOutput,pstConn->a_chOutBuf,(size_t)pstConn->iOutLen);
-   a_chOutput[pstConn->iOutLen]='\0';
-   return strstr(a_chOutput,szText)!=NULL;
+   return OutputHasBytes(pstConn,szText,strlen(szText));
 }
 
 static void TestInputAndQuit(void)
@@ -268,6 +278,101 @@ static void TestInputAndQuit(void)
       "quit defers freeing the connection until input handling returns");
    close(a_iSockets[0]);
    close(a_iSockets[1]);
+   pstFirstConn=NULL;
+}
+
+static void InputFragment(conn_t *connection,int peer,const unsigned char *bytes,size_t length)
+{
+   Check(write(peer,bytes,length)==(ssize_t)length&&GetInput(connection),
+      "Telnet input fragment processed");
+}
+
+static void TestTelnetInput(void)
+{
+   conn_t connection=stConnEmpty;
+   int sockets[2],command,option;
+   size_t i;
+   unsigned char large[MAX_BUF],matrix[256*3+4];
+   const unsigned char naws[]={255,250,31,0,80,0,24,255,240,'w','h','o','\n'};
+   const unsigned char controls[]={'w',255,241,'h',255,249,'o','\r','\n'};
+   const unsigned char escaped[]={
+      255,250,31,255,255,240,'q','u','i','t','\n',255,240,'w','h','o','\n'
+   };
+   const unsigned char negative_acks[]={255,252,80,255,254,0};
+   const unsigned char wont_binary[]={255,252,0},dont_naws[]={255,254,31};
+   const unsigned char sub_start[]={255,250,31},sub_end[]={255,240,'w','h','o','\n'};
+   const unsigned char password_controls[]={255,253,1,255,250,31,0,80,0,10,255,240};
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"Telnet socket fixture");
+   connection.iSocket=sockets[0];
+   connection.eStatus=CROWD;
+   connection.iIp=9000;
+   connection.connection_token=40001;
+   pstFirstConn=&connection;
+   InputFragment(&connection,sockets[1],naws,sizeof(naws));
+   Check(OutputContains(&connection,"visible")&&!OutputContains(&connection,"Unrecognised"),
+      "valid NAWS negotiation never contaminates a command");
+   connection.iOutLen=0;
+   for(i=0;i<sizeof(naws);i++)
+      InputFragment(&connection,sockets[1],naws+i,1);
+   Check(OutputContains(&connection,"visible")&&connection.iInLen==0,
+      "Telnet framing survives a read boundary after every byte");
+   connection.iOutLen=0;
+   InputFragment(&connection,sockets[1],controls,sizeof(controls));
+   Check(OutputContains(&connection,"visible"),"single-byte Telnet controls preserve CRLF commands");
+   connection.iOutLen=0;
+   for(i=0;i<sizeof(escaped);i++)
+      InputFragment(&connection,sockets[1],escaped+i,1);
+   Check(OutputContains(&connection,"visible")&&!connection.bClosing,
+      "escaped IAC and newline/quit bytes stay inside subnegotiation");
+   memset(large,'x',sizeof(large));
+   InputFragment(&connection,sockets[1],sub_start,sizeof(sub_start));
+   InputFragment(&connection,sockets[1],large,sizeof(large));
+   InputFragment(&connection,sockets[1],large,sizeof(large));
+   InputFragment(&connection,sockets[1],sub_end,sizeof(sub_end));
+   Check(connection.iInLen==0&&!connection.bInputTooLong,
+      "oversized subnegotiations consume constant state, not the application buffer");
+   for(command=251;command<=254;command++)
+   {
+      for(option=0;option<256;option++)
+      {
+         matrix[(size_t)option*3]=255;
+         matrix[(size_t)option*3+1]=(unsigned char)command;
+         matrix[(size_t)option*3+2]=(unsigned char)option;
+      }
+      memcpy(matrix+256*3,"who\n",4);
+      connection.iOutLen=0;
+      InputFragment(&connection,sockets[1],matrix,sizeof(matrix));
+      Check(OutputContains(&connection,"visible")&&!OutputContains(&connection,"Unrecognised"),
+         "every option byte is consumed by WILL/WONT/DO/DONT framing");
+      if(command==251)
+         Check(OutputHasBytes(&connection,dont_naws,sizeof(dont_naws)),
+            "unsupported remote options are refused");
+      if(command==253)
+         Check(OutputHasBytes(&connection,wont_binary,sizeof(wont_binary)),
+            "unsupported local binary option is refused with its NUL option byte");
+   }
+   connection.iOutLen=0;
+   InputFragment(&connection,sockets[1],negative_acks,sizeof(negative_acks));
+   Check(connection.iOutLen==0,"negative acknowledgments do not start negotiation loops");
+   SetInput(&connection,"login Regtest");
+   connection.iOutLen=0;
+   InputFragment(&connection,sockets[1],(const unsigned char*)"regression-",11);
+   for(i=0;i<sizeof(password_controls);i++)
+      InputFragment(&connection,sockets[1],password_controls+i,1);
+   Check(connection.auth_stage==AUTH_LOGIN_PASSWORD&&connection.iInLen==11&&
+      connection.iOutLen==0,"password echo acknowledgment and NAWS newline do not advance the prompt");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   InputFragment(&connection,sockets[1],(const unsigned char*)"test-password-only\n",19);
+   Check(auth_jobs[0].state==1&&
+      strcmp(auth_jobs[0].password,"regression-test-password-only")==0&&
+      !OutputContains(&connection,"regression-test-password-only")&&
+      connection.a_chInBuf[0]=='\0',"Telnet payload never changes, echoes or retains consumed password input");
+   AccountCancel(&connection);
+   sodium_memzero(auth_jobs,sizeof(auth_jobs));
+   close(sockets[0]);
+   close(sockets[1]);
    pstFirstConn=NULL;
 }
 
@@ -413,6 +518,340 @@ static void TestAuthenticationLimits(void)
    pstFirstConn=NULL;
 }
 
+static void TestSavedInspection(void)
+{
+   struct historical_body {
+      char name[16];
+      int stats[5];
+      int speed,room,wins,losses,kills,damage;
+      conn_t *opponent;
+   };
+   saved_character snapshot;
+   body_t before,after;
+   FILE *file;
+   Check(sizeof(body_t)==sizeof(struct historical_body)&&
+      offsetof(body_t,iStats)==offsetof(struct historical_body,stats)&&
+      offsetof(body_t,iSpeed)==offsetof(struct historical_body,speed)&&
+      offsetof(body_t,iRoom)==offsetof(struct historical_body,room)&&
+      offsetof(body_t,iWin)==offsetof(struct historical_body,wins)&&
+      offsetof(body_t,iLoss)==offsetof(struct historical_body,losses)&&
+      offsetof(body_t,iKill)==offsetof(struct historical_body,kills)&&
+      offsetof(body_t,iDam)==offsetof(struct historical_body,damage)&&
+      offsetof(body_t,pstOpponent)==offsetof(struct historical_body,opponent),
+      "shared record header exactly preserves historical native ABI");
+   ResetWorld();
+   strcpy(test_body_one.a_chName,"Inspecthero");
+   test_body_one.iStats[0]=4;
+   test_body_one.iStats[1]=5;
+   test_body_one.iStats[2]=6;
+   test_body_one.iStats[3]=7;
+   test_body_one.iStats[4]=8;
+   test_body_one.iWin=42;
+   Save(&test_body_one);
+   file=fopen("Inspecthero","rb");
+   Check(file!=NULL&&fread(&before,sizeof(before),1,file)==1,"snapshot fixture read");
+   fclose(file);
+   Check(CharacterInspect("Inspecthero",&snapshot)==1&&snapshot.wins==42&&
+      snapshot.stats[4]==8,"native saved character inspection");
+   file=fopen("Inspecthero","rb");
+   Check(file!=NULL&&fread(&after,sizeof(after),1,file)==1&&
+      memcmp(&before,&after,sizeof(before))==0,"inspection does not modify save bytes");
+   fclose(file);
+   Check(CharacterInspect("../Inspecthero",&snapshot)==-1&&
+      CharacterInspect("Missinghero",&snapshot)==0,"unsafe/missing inspection paths");
+   Check(symlink("Inspecthero","Inspectlink")==0,"inspection symlink fixture");
+   Check(CharacterInspect("Inspectlink",&snapshot)==-1,"inspection refuses symlinks");
+   unlink("Inspectlink");
+   unlink("Inspecthero");
+   pstFirstConn=NULL;
+}
+
+static void TestInGameStaff(void)
+{
+   account_session owner;
+   int sockets[2];
+   ResetWorld();
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"dashboard");
+   Check(OutputContains(&test_conn_one,"Permission denied"),"players denied in-game dashboard");
+   Check(AccountSetRole("Regtest",ROLE_BUILDER),"builder dashboard fixture");
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"staff");
+   Check(OutputContains(&test_conn_one,"STAFF DASHBOARD")&&
+      !OutputContains(&test_conn_one,"staff accounts"),"builder sees capability-filtered menu");
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"staff accounts");
+   Check(OutputContains(&test_conn_one,"Permission denied"),"builder cannot bypass menu");
+   Check(AccountRegister("Staffowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Staffowner",ROLE_OWNER),"owner dashboard fixture");
+   test_conn_one.account=owner;
+   strcpy(test_conn_one.account_name,"Staffowner");
+   test_conn_one.connection_token=10001;
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"staff confirmation socket fixture");
+   test_conn_one.iSocket=sockets[0];
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"staff target fixture");
+   test_conn_one.iOutLen=0;
+   SetInput(&test_conn_one,"staff role Regtest builder extra");
+   Check(test_conn_one.auth_stage==AUTH_IDLE,"staff arguments cannot contain passwords");
+   SetInput(&test_conn_one,"staff role Regtest builder");
+   Check(test_conn_one.auth_stage==AUTH_STAFF_CONFIRM,"role change requires explicit confirmation");
+   SetInput(&test_conn_one,"cancel");
+   Check(test_conn_one.auth_stage==AUTH_IDLE&&AccountSessionRole(regression_account)==ROLE_PLAYER,
+      "cancelled role change leaves account untouched");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   SetInput(&test_conn_one,"staff role Regtest builder");
+   SetInput(&test_conn_one,"CONFIRM");
+   Check(test_conn_one.auth_stage==AUTH_STAFF_PASSWORD,"confirmation opens separate password prompt");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   Check(auth_jobs[0].state==1&&auth_jobs[0].operation==4&&
+      AccountSessionRole(regression_account)==ROLE_PLAYER,
+      "password proof queues without applying staff mutation");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_BUILDER&&
+      test_conn_one.auth_stage==AUTH_IDLE,"verified result applies on game thread");
+   SetInput(&test_conn_one,"staff role Regtest moderator");
+   SetInput(&test_conn_one,"CONFIRM");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   test_conn_one.auth_deadline=AuthClock()-1;
+   AccountPoll();
+   Check(test_conn_one.bClosing&&AccountSessionRole(regression_account)==ROLE_BUILDER,
+      "expired completed proof cannot apply role mutation");
+   test_conn_one.bClosing=FALSE;
+   SetInput(&test_conn_one,"staff role Regtest moderator");
+   SetInput(&test_conn_one,"CONFIRM");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   auth_jobs[0].token++;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_BUILDER,
+      "stale connection token cannot apply queued staff action");
+   AccountCancel(&test_conn_one);
+   SetInput(&test_conn_one,"staff role Regtest moderator");
+   SetInput(&test_conn_one,"CONFIRM");
+   SetInput(&test_conn_one,"regression-test-password-only");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   close(sockets[1]);
+   AccountPoll();
+   Check(test_conn_one.bClosing&&AccountSessionRole(regression_account)==ROLE_BUILDER,
+      "known-disconnected socket cannot apply completed proof");
+   close(sockets[0]);
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore gameplay fixture role");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
+static void TestAuthenticationReplay(void)
+{
+   account_session owner;
+   conn_t connection=stConnEmpty;
+   int sockets[2],success;
+   char oversized[MAX_BUF];
+   Check(AccountRegister("Nonceowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Nonceowner",ROLE_OWNER),"request isolation owner fixture");
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"request isolation sockets");
+   connection.iSocket=sockets[0];
+   connection.eStatus=CROWD;
+   connection.account=owner;
+   connection.iIp=7000;
+   connection.connection_token=20001;
+   strcpy(connection.account_name,"Nonceowner");
+   pstFirstConn=&connection;
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   SetInput(&connection,"staff role Regtest administrator");
+   SetInput(&connection,"CONFIRM");
+   SetInput(&connection,"regression-test-password-only");
+   Check(auth_jobs[0].state==1,"old staff proof queued");
+   auth_jobs[0].state=2; /* Deterministically pause the worker's completion. */
+   memset(oversized,'A',sizeof(oversized));
+   Check(write(sockets[1],oversized,sizeof(oversized))==(ssize_t)sizeof(oversized)&&
+      GetInput(&connection),"oversized line reaches cancellation path");
+   Check(write(sockets[1],"\n",1)==1&&GetInput(&connection)&&
+      connection.auth_stage==AUTH_IDLE,"overflow cancels the old staff request");
+   SetInput(&connection,"staff role Regtest moderator");
+   SetInput(&connection,"CONFIRM");
+   SetInput(&connection,"regression-test-password-only");
+   Check(auth_jobs[1].state==1,"new staff proof has a separate queue slot");
+   auth_jobs[0].state=3;
+   auth_jobs[0].ok=1;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_PLAYER&&
+      connection.auth_stage==AUTH_WAIT,
+      "cancelled staff proof cannot mutate or cancel a newer action");
+   auth_jobs[1].state=3;
+   auth_jobs[1].ok=1;
+   AccountPoll();
+   Check(AccountSessionRole(regression_account)==ROLE_MODERATOR,
+      "only the newer staff proof applies its requested role");
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore replay target role");
+
+   for(success=0;success<=1;success++)
+   {
+      connection.account.id=connection.account.epoch=0;
+      connection.iIp=(uint32_t)(7100+success);
+      connection.iOutLen=0;
+      SetInput(&connection,"login Regtest");
+      SetInput(&connection,"regression-test-password-only");
+      auth_jobs[0].state=2;
+      AccountCancel(&connection);
+      SetInput(&connection,"login Nonceowner");
+      SetInput(&connection,"regression-test-password-only");
+      auth_jobs[0].state=3;
+      auth_jobs[0].ok=success;
+      auth_jobs[0].session=regression_account;
+      AccountPoll();
+      Check(connection.account.id==0&&connection.auth_stage==AUTH_WAIT,
+         "stale successful/failed login cannot affect a newer login");
+      auth_jobs[1].state=3;
+      auth_jobs[1].ok=1;
+      auth_jobs[1].session=owner;
+      AccountPoll();
+      Check(connection.account.id==owner.id&&
+         strcmp(connection.account_name,"Nonceowner")==0,
+         "accepted login identity matches its own account prompt");
+   }
+   {
+      uint64_t saved_token=next_auth_request_token;
+      next_auth_request_token=UINT64_MAX;
+      AccountQueue(&connection,2,"regression-test-password-only");
+      Check(next_auth_request_token==UINT64_MAX&&
+         connection.auth_request_token==0&&connection.auth_stage==AUTH_IDLE&&
+         auth_jobs[0].state==0,"request-token exhaustion fails closed without wrap/reuse");
+      next_auth_request_token=saved_token;
+   }
+   close(sockets[0]);
+   close(sockets[1]);
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   pstFirstConn=NULL;
+}
+
+static void TestCompletedAuthenticationDeadlines(void)
+{
+   account_session owner;
+   conn_t connection;
+   int sockets[2],operation,expired,success;
+   Check(AccountRegister("Expiryowner","regression-test-password-only",&owner)&&
+      AccountSetRole("Expiryowner",ROLE_OWNER),"deadline owner fixture");
+   Check(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0,"deadline socket fixture");
+   memset(auth_ip_limits,0,sizeof(auth_ip_limits));
+   auth_global_attempts=0;
+   for(operation=1;operation<=4;operation++)
+      for(expired=0;expired<=1;expired++)
+         for(success=0;success<=1;success++)
+         {
+            connection=stConnEmpty;
+            connection.iSocket=sockets[0];
+            connection.eStatus=CROWD;
+            connection.connection_token=30001;
+            connection.iIp=(uint32_t)(8000+operation);
+            strcpy(connection.account_name,"Regtest");
+            if(operation==3)
+               connection.account=regression_account;
+            if(operation==4)
+            {
+               connection.account=owner;
+               strcpy(connection.account_name,"Expiryowner");
+               connection.staff_target=regression_account.id;
+               connection.staff_operation=1;
+               connection.staff_value=ROLE_BUILDER;
+               Check(AccountSetRole("Regtest",ROLE_PLAYER),"deadline target reset");
+            }
+            pstFirstConn=&connection;
+            memset(auth_jobs,0,sizeof(auth_jobs));
+            AccountQueue(&connection,operation,"regression-test-password-only");
+            Check(auth_jobs[0].state==1,"deadline fixture queued");
+            connection.auth_deadline=AuthClock()+(expired?0:120);
+            auth_jobs[0].state=3;
+            auth_jobs[0].ok=success;
+            auth_jobs[0].session=operation==4?owner:regression_account;
+            AccountPoll();
+            Check(connection.auth_stage==AUTH_IDLE&&connection.auth_request_token==0&&
+               connection.bClosing==(expired?TRUE:FALSE),
+               "all completed results respect inclusive deadlines, including failures");
+            if(operation<=2)
+               Check(connection.account.id==(!expired&&success?regression_account.id:0),
+                  "expired registration/login result never grants a session");
+            if(operation==4)
+               Check(AccountSessionRole(regression_account)==
+                  (!expired&&success?ROLE_BUILDER:ROLE_PLAYER),
+                  "expired staff proof never commits its pending mutation");
+         }
+   Check(AccountSetRole("Regtest",ROLE_PLAYER),"restore deadline target");
+   memset(auth_jobs,0,sizeof(auth_jobs));
+   close(sockets[0]);
+   close(sockets[1]);
+   pstFirstConn=NULL;
+}
+
+static void TestProgressionCounterLimits(void)
+{
+   int fight,i;
+   saved_character snapshot;
+   conn_t *loser;
+   ResetWorld();
+   for(i=STR;i<=WIT;i++)
+      test_body_one.iStats[i]=9;
+   test_body_one.iWin=test_body_one.iKill=INT_MAX-1;
+   for(fight=0;fight<2;fight++)
+   {
+      body_t *body=calloc(1,sizeof(*body));
+      Check(body!=NULL,"counter combat body allocation");
+      strcpy(body->a_chName,"Defender");
+      for(i=STR;i<=WIT;i++)
+         body->iStats[i]=1;
+      test_conn_two.pstBody=body;
+      test_conn_two.eStatus=GLADIATOR;
+      Save(body);
+      SetInput(&test_conn_one,"challenge Defender");
+      SetInput(&test_conn_two,"accept");
+      for(i=0;i<20&&test_conn_two.pstBody;i++)
+         Update();
+      Check(test_conn_two.pstBody==NULL&&test_body_one.iWin==INT_MAX&&
+         test_body_one.iKill==INT_MAX,"combat increments to the ceiling without wrapping beyond it");
+      Check(ValidPlayer(&test_body_one,"Attacker")&&
+         CharacterInspect("Attacker",&snapshot)==1&&snapshot.wins==INT_MAX&&
+         snapshot.kills==INT_MAX,"ceiling progression remains valid in the unchanged save format");
+      Check(access("Defender",F_OK)!=0&&errno==ENOENT,"counter ceiling preserves permadeath");
+   }
+   loser=calloc(1,sizeof(*loser));
+   Check(loser!=NULL,"counter surrender connection allocation");
+   loser->pstBody=calloc(1,sizeof(*loser->pstBody));
+   Check(loser->pstBody!=NULL,"counter surrender body allocation");
+   strcpy(loser->pstBody->a_chName,"Loserhero");
+   for(i=STR;i<=WIT;i++)
+      loser->pstBody->iStats[i]=1;
+   loser->pstBody->iLoss=INT_MAX;
+   loser->pstBody->pstOpponent=&test_conn_one;
+   loser->pstNext=&test_conn_one;
+   loser->eStatus=FIGHTING;
+   loser->iSocket=-1;
+   test_conn_one.pstPrev=loser;
+   test_conn_one.pstNext=NULL;
+   test_conn_one.iSocket=-1;
+   test_conn_one.eStatus=FIGHTING;
+   test_body_one.pstOpponent=loser;
+   pstFirstConn=loser;
+   CloseConnection(loser);
+   Check(test_body_one.iWin==INT_MAX&&test_body_one.pstOpponent==NULL&&
+      test_conn_one.eStatus==GLADIATOR,"surrender at the ceiling preserves winner and cleanup");
+   Check(CharacterInspect("Loserhero",&snapshot)==1&&snapshot.losses==INT_MAX,
+      "surrender loss counter remains loadable at the ceiling");
+   Check(CharacterInspect("Attacker",&snapshot)==1&&snapshot.wins==INT_MAX&&
+      snapshot.kills==INT_MAX,"surrender does not corrupt existing ceiling progression");
+   unlink("Attacker");
+   unlink("Loserhero");
+   pstFirstConn=NULL;
+}
+
 static void TestReplacedChallenges(void)
 {
    conn_t stThird;
@@ -532,6 +971,12 @@ int main(void)
    TestAllTrainingCommands();
    TestAccountCommandGates();
    TestAuthenticationLimits();
+   TestSavedInspection();
+   TestInGameStaff();
+   TestAuthenticationReplay();
+   TestCompletedAuthenticationDeadlines();
+   TestProgressionCounterLimits();
+   TestTelnetInput();
    AccountsClose();
    unlink("regression-accounts.sqlite3");
    printf("Passed %d Gladiator Pits regression checks.\n", tests_run);

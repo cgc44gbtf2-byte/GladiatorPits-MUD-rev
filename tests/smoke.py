@@ -41,9 +41,14 @@ class Client:
     def close(self):
         self.socket.close()
 
-    def authenticate(self, name, register=False, password=PASSWORD):
+    def authenticate(self, name, register=False, password=PASSWORD, telnet=False):
         self.send(f"{'register' if register else 'login'} {name}")
         self.expect(b"Password: ")
+        if telnet:
+            # Echo acknowledgment plus an 80x10 NAWS frame (payload includes LF).
+            frame = bytes((255, 253, 1, 255, 250, 31, 0, 80, 0, 10, 255, 240))
+            for byte in frame:
+                self.socket.sendall(bytes((byte,)))
         self.send(password)
         if register:
             self.expect(b"Confirm password: ")
@@ -117,7 +122,9 @@ def main():
             alice = connect(port)
             alice.send("create Alice")
             alice.expect(b"Permission denied")
-            alice.authenticate("Alice", register=True)
+            alice.socket.sendall(bytes((255, 250, 31, 0, 80, 0, 24, 255, 240)) + b"who\r\n")
+            alice.expect(b"visible")
+            alice.authenticate("Alice", register=True, telnet=True)
             train(alice, "Alice")
             bob = connect(port)
             bob.authenticate("Bob", register=True)
@@ -141,7 +148,7 @@ def main():
             alice.expect_closed()
 
             bob = connect(port)
-            bob.authenticate("Bob")
+            bob.authenticate("Bob", telnet=True)
             bob.send("create Alice")
             bob.expect(b"Character unavailable")
             legacy = Path(directory, "Legacyhero")
@@ -230,7 +237,7 @@ def main():
                     assert PASSWORD.encode() not in content
                     assert NEW_PASSWORD.encode() not in content
             assert Path(directory, "accounts.sqlite3").stat().st_mode & 0o077 == 0
-            print("TCP smoke passed: accounts, ownership/legacy protection, gameplay, "
+            print("TCP smoke passed: Telnet framing, accounts, ownership/legacy protection, gameplay, "
                   "restart, password/session revocation, roles, rate limits, "
                   "disconnected auth jobs, and staff shutdown.")
         finally:

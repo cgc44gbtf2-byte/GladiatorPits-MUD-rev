@@ -26,6 +26,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdint.h>
+#include <limits.h>
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -42,6 +43,7 @@
 #include <pthread.h>
 #include <sodium.h>
 #include "accounts.h"
+#include "player_record.h"
 
 /******************************************************************************
  Required literals.
@@ -88,8 +90,6 @@ typedef enum {CROWD=1,CITIZEN=2,TRAINING=4,GLADIATOR=8,
 
 typedef struct connection conn_t;
 
-typedef struct body body_t;
-
 typedef struct
 {
    char       *szCommand;
@@ -130,20 +130,13 @@ char   *StatusName      (body_t*pstBody);
 conn_t *FindPerson      (char*szTxt);
 void    Save            (body_t*pstBody);
 void    ClearChallenge  (conn_t*pstConn);
-bool    ValidPlayerName (const char*szName);
-bool    ValidPlayer     (const body_t*pstBody,const char*szName);
+static void IncrementProgression(int *counter,const char *name,const char *field);
 
 /******************************************************************************
  Required global variables.
  ******************************************************************************/
 
-static struct body
-{
-   char     a_chName[16];
-   int      iStats[5];
-   int      iSpeed,iRoom,iWin,iLoss,iKill,iDam;
-   conn_t  *pstOpponent;
-} stBodyEmpty;
+static body_t stBodyEmpty;
 
 static struct connection
 {
@@ -154,12 +147,16 @@ static struct connection
    uint32_t iIp;
    bool     bWriteFailed,bClosing,bInputTooLong;
    account_session account;
-   uint64_t connection_token;
+   uint64_t connection_token,auth_request_token;
+   int telnet_state;
+   unsigned char telnet_command;
    int auth_stage;
    time_t auth_deadline;
    char account_name[ACCOUNT_NAME_MAX+1];
    char auth_password[ACCOUNT_PASSWORD_MAX+1];
    char auth_old_password[ACCOUNT_PASSWORD_MAX+1];
+   int64_t staff_target;
+   int staff_operation,staff_value;
    conn_t  *pstPrev,*pstNext;
 } stConnEmpty;
 
@@ -174,8 +171,11 @@ extern const cmd_table_t kstCmdTable[];
  ******************************************************************************/
 
 /* Include the source code file for the commands */
+static void StaffApply(conn_t *connection,int64_t target,int operation,int value);
 #include "account_commands.c"
 #include "commands.c"
+#include "staff_commands.c"
+#include "telnet.c"
 
 /* Create the command table */
 const cmd_table_t kstCmdTable[] =
@@ -187,6 +187,8 @@ const cmd_table_t kstCmdTable[] =
    {"login",     CmdLogin,     ALL,PERM_PUBLIC},
    {"account",   CmdAccount,   ALL,PERM_PUBLIC},
    {"password",  CmdPassword,  ALL,PERM_PLAY},
+   {"staff",     CmdStaff,     ALL,PERM_DASHBOARD},
+   {"dashboard", CmdStaff,     ALL,PERM_DASHBOARD},
    {"shutdown",  CmdShutdown,  ALL,PERM_SHUTDOWN},
    {"say",       CmdSay,       ALL,PERM_PUBLIC},
    {"chat",      CmdChat,      ALL&~CROWD,PERM_PLAY},
@@ -378,6 +380,8 @@ bool GetInput(conn_t*pstConn)
    /* Process every complete line; TCP may deliver several in one read. */
    for(i=0;i<(int)iInput;i++)
    {
+      if(!TelnetData(pstConn,(unsigned char)a_chBuf[i]))
+         continue;
       if(a_chBuf[i]=='\n')
       {
          pstConn->a_chInBuf[pstConn->iInLen]='\0';
@@ -736,8 +740,9 @@ void CloseConnection(conn_t*pstConn)
          if(pstConn->eStatus==FIGHTING)
          {
             /* Adjusts wins and losses... */
-            pstConn->pstBody->iLoss++;
-            pstBody->iWin++;
+            IncrementProgression(&pstConn->pstBody->iLoss,
+               pstConn->pstBody->a_chName,"losses");
+            IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
 
             /* ...stop the fighting... */
             pstConn->pstBody->pstOpponent->eStatus=GLADIATOR;
@@ -870,6 +875,16 @@ void GameLoop(int iControl)
  *
  * This function has no return value.
  */
+/* Native saves use int counters. Never wrap valid progression negative. */
+static void IncrementProgression(int *counter,const char *name,const char *field)
+{
+   if(*counter<INT_MAX)
+      ++*counter;
+   else
+      Log("Progression ceiling reached for %s (%s); existing value retained.\n",
+         name,field);
+}
+
 void Update(void)
 {
    conn_t*pstConn,*pstUser,*pstConnNext;
@@ -949,8 +964,8 @@ void Update(void)
                pstUser->eStatus=CROWD;
 
                /* Reward the victor... */
-               pstBody->iWin++;
-               pstBody->iKill++;
+               IncrementProgression(&pstBody->iWin,pstBody->a_chName,"wins");
+               IncrementProgression(&pstBody->iKill,pstBody->a_chName,"kills");
 
                /* ...stop them fighting... */
                pstBody->pstOpponent=NULL;
@@ -1176,31 +1191,3 @@ void Save(body_t*pstBody)
       remove(a_chTemporary);
    }
 }
-
-bool ValidPlayerName(const char*szName)
-{
-   size_t i;
-   size_t iLength=strlen(szName);
-
-   if(iLength<3||iLength>15)
-      return FALSE;
-   for(i=0;i<iLength;i++)
-      if(!isalpha((unsigned char)szName[i]))
-         return FALSE;
-   return TRUE;
-}
-
-bool ValidPlayer(const body_t*pstBody,const char*szName)
-{
-   int i;
-
-   if(!memchr(pstBody->a_chName,'\0',sizeof(pstBody->a_chName))||
-      strcmp(pstBody->a_chName,szName)!=0)
-      return FALSE;
-   for(i=STR;i<=WIT;i++)
-      if(pstBody->iStats[i]<1||pstBody->iStats[i]>9)
-         return FALSE;
-   return pstBody->iWin>=0&&pstBody->iLoss>=0&&pstBody->iKill>=0&&
-      pstBody->iDam>=0&&pstBody->iDam<=HEALTH(pstBody);
-}
-
