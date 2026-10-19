@@ -1,12 +1,24 @@
-# Public clean-source release readiness
+# Public source release record and operations
 
-## v1.0.0-rc.1 publication decision
+## Current publication status
 
-The selected public-source candidate is `v1.0.0-rc.1`. The repository is public;
-runtime data directories remain private. The authorized order is to finish the
-public README, verify the final PR checks, merge PR #6, then tag/publish a GitHub
-prerelease from the exact merged master commit. Never release the unmerged PR
-head instead. Verify master CI and source contents before publication.
+The public `v1.0.0-rc.1` prerelease was published on 2026-10-16 from merged
+`master` commit `cb592315b102da426f0daceae379cde85e149d4a`. The tag resolves
+directly to that commit. This is a source release, not a deployed game server.
+GitHub provides generated source downloads for the tag; the release has no
+separately attached archive, signature, or checksum asset.
+
+PR #6 records the final hosted checks and a verified 47-file source-archive
+rehearsal/rebuild for the merged commit. The pre-publication checklist below is
+historical, not a pending release gate. Actual deployment/client checks and any
+separately retained or signed source archive remain distinct follow-up work.
+
+## Publication plan (recorded before release)
+
+Before publication, `v1.0.0-rc.1` was selected as the public-source candidate.
+The plan was to finish the public README, verify the final PR checks, merge PR #6,
+then publish the prerelease from the exact merged `master` commit—not the
+unmerged PR head. That sequence is complete; see the publication status above.
 
 Earlier audit/rehearsal observations below are historical, not a statement that
 the repository is private or that the approved version is still undecided.
@@ -116,7 +128,8 @@ and unlisted artifacts rather than deleting them. Strict archive checks never
 tolerate `.git`. An attacker who controls the manifest/checker can bypass them:
 these are trusted-maintainer safeguards, not a signature or external attestation.
 
-After approval, substitute an explicit reviewed full commit for COMMIT:
+For a future, separately reviewed source-archive attachment, substitute an
+explicit reviewed full commit for COMMIT:
 
 ```sh
 git -c tar.umask=0077 archive --format=tar --prefix=gladiatorpits/ COMMIT > /tmp/gladiatorpits-source.tar
@@ -128,21 +141,25 @@ Run from a clean checkout containing this checker/manifest. Keep output outside
 the checkout. The explicit archive umask is required for the secure file-mode
 policy; do not assume platform/Git archive defaults. The checker never extracts
 archives. Validate before extracting/building in a separate staging directory.
-Only publish an artifact and its digest for the approved commit, not this rehearsal.
-No source archive, release or tag was published by the audit.
+For any separate archive attachment, publish its digest only after validating
+the archive against the approved commit. At the time of the original audit
+rehearsal, no source archive, release, or tag had yet been published.
 
-## Approval checklist and derivative baseline
+## Publication record and follow-ups
 
-- [ ] Review notice/provenance findings and final release notes.
-- [ ] Review all PR changes and final hosted checks; choose the release version.
-- [ ] Explicitly approve merge and tag/source-asset publication.
-- [ ] Generate, validate, unpack and rebuild the approved source artifact; record
-  full commit, tool versions, file count and SHA-256.
-- [ ] Retain a source/artifact copy and record the baseline for future support.
-- [ ] Only after baseline approval, create the derivative branch from that exact
-  commit; do not mix derivative features into this legacy release.
-- [ ] Before public hosting (separate from source distribution), satisfy encrypted
-  transport, peer-IP/rate-limit and real Mudlet/client checks.
+The pre-publication approval sequence is complete for `v1.0.0-rc.1`: PRs #1–#6
+were merged, final hosted checks passed, and the tag/release were published from
+the merged commit identified above. This does not claim a separate signed archive
+or checksum asset; GitHub's generated tag archives are the available downloads.
+
+The repository does not record an off-GitHub retained archive or digest. If one
+is wanted for support or distribution, generate, validate, rebuild, and retain it
+separately with its full commit and SHA-256. Derivative development remains a
+separate project based on the approved release baseline.
+
+Before hosting a public game, still complete the encrypted-transport, peer-IP /
+rate-limit, real Mudlet/client and deployment checks above. No public game server
+deployment is implied by publishing source.
 
 One-hour endurance is deferred by choice, not falsely marked complete. The
 existing two primary five-minute soaks plus memory diagnostic are in `SOAK_TEST.md`.
@@ -164,9 +181,9 @@ performed by this document. `STORAGE_RECOVERY.md` is the detailed operator guide
 
 ## Verification evidence
 
-The fresh-artifact rehearsal and final hosted verification are recorded below
-and in PR #6, tied to the exact published head. No version is assigned here and
-no release-ready claim substitutes for the approval checklist above.
+The fresh-artifact rehearsal and final hosted verification below are recorded
+in PR #6 and tied to the published head. The release version is `v1.0.0-rc.1`;
+publication does not substitute for the operational checks listed above.
 
 - A private 47-file source snapshot was checked, archived with Git's explicit
   private umask, validated without extraction, unpacked, checked again and built.
@@ -181,6 +198,6 @@ no release-ready claim substitutes for the approval checklist above.
   including the new proxy parser. `actionlint`, ShellCheck and `bash -n` passed.
   Original MIT permission text remains unchanged except the additional requested
   contribution copyright line; original author/source notices remain.
-- Hosted current-head results belong in PR #6 rather than an endlessly changing
-  self-referential release commit. Source packaging is a rehearsal only, not a
-  signed artifact, assigned version, tag, release publication or hosting approval.
+- Hosted current-head results are recorded in PR #6 rather than an endlessly
+  changing self-referential release commit. The rehearsal did not create a signed
+  archive asset or approve hosting; the published tag/release is verified above.
